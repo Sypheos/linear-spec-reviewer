@@ -1,0 +1,16 @@
+{
+  "name": "linear-spec-review",
+  "version": "0.1.0",
+  "description": "Obsidian plugin to import Linear project overviews and review comments.",
+  "private": true,
+  "scripts": {
+    "dev": "node esbuild.config.mjs",
+    "build": "tsc --noEmit --skipLibCheck && node esbuild.config.mjs production"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "esbuild": "^0.23.0",
+    "obsidian": "^1.9.0",
+    "typescript": "^5.5.0"
+  }
+}
