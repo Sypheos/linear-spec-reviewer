@@ -5,6 +5,7 @@ const production = process.argv.includes("production");
 const context = await esbuild.context({
   entryPoints: ["src/main.ts"],
   bundle: true,
+  platform: "node", // Desktop-only plugin; the OS cache uses Node built-ins.
   external: [
     "obsidian",
     "electron",

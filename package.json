@@ -3,14 +3,17 @@
   "version": "0.1.0",
   "description": "Obsidian plugin to import Linear project overviews and review comments.",
   "private": true,
+  "type": "module",
   "scripts": {
     "dev": "node esbuild.config.mjs",
-    "build": "tsc --noEmit --skipLibCheck && node esbuild.config.mjs production"
+    "build": "tsc --noEmit --skipLibCheck && node esbuild.config.mjs production",
+    "test": "node --experimental-strip-types --test tests/*.test.ts"
   },
   "devDependencies": {
     "@types/node": "^22.0.0",
     "esbuild": "^0.23.0",
     "obsidian": "^1.9.0",
-    "typescript": "^5.5.0"
+    "typescript": "^5.5.0",
+    "yjs": "^13.6.33"
   }
 }

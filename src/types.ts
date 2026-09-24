@@ -48,6 +48,8 @@ export interface LinearComment {
   id: string;
   /** Markdown body of the comment. */
   body: string;
+  /** Figma frame screenshot URLs extracted from Linear's rich comment body. */
+  figmaScreenshots: ReadonlyMap<string, string>;
   url: string;
   createdAt: string;
   /** Non-null when the thread is resolved (read-only badge). */
@@ -79,11 +81,17 @@ export interface PluginSettings {
   secretName: string;
   /** Vault-relative folder where imported specs are written. */
   specsFolder: string;
+  /** Store authenticated images in the vault; false keeps them in a local OS cache. */
+  storeAssetsInVault: boolean;
+  /** Render images and Linear-hosted Figma screenshots inline. */
+  previewImages: boolean;
 }
 
 export const DEFAULT_SETTINGS: PluginSettings = {
   secretName: "",
   specsFolder: "Specs",
+  storeAssetsInVault: false,
+  previewImages: true,
 };
 
 export const LINEAR_COMMENTS_VIEW = "linear-spec-review-comments";

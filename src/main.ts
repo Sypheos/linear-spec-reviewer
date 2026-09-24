@@ -3,6 +3,8 @@ import {
   WorkspaceLeaf,
   TFile,
   Notice,
+  MarkdownRenderChild,
+  MarkdownView,
 } from "obsidian";
 import {
   PluginSettings,
@@ -12,6 +14,12 @@ import {
   FM_DOCUMENT_CONTENT_ID,
 } from "./types";
 import { assertSecretStorage } from "./linear/gql";
+import { AssetStore } from "./linear/assets";
+import { AssetPreview } from "./render/assetPreview";
+import { FigmaPreview } from "./render/figmaPreview";
+import { ImageDownloads } from "./render/imageDownloads";
+import { getProjectFigmaScreenshots } from "./linear/queries";
+import { StoredImage } from "./linear/assets";
 import { CommentsView, CommentsHost } from "./view/CommentsView";
 import { LinearSettingTab, SettingsHost } from "./settings";
 import {
@@ -34,6 +42,10 @@ export default class LinearSpecReviewPlugin
    * changes; manual Refresh remains the explicit way to re-fetch the same note.
    */
   private lastLoadedProjectId: string | null = null;
+  private assetPreview: AssetPreview | null = null;
+  private figmaPreview: FigmaPreview | null = null;
+  private assetStore: AssetStore | null = null;
+  private readonly imageDownloads = new ImageDownloads(4);
 
   async onload(): Promise<void> {
     await this.loadSettings();
@@ -55,6 +67,23 @@ export default class LinearSpecReviewPlugin
     );
 
     this.addSettingTab(new LinearSettingTab(this.app, this));
+    this.assetStore = new AssetStore(this.app, () => this.getSecretName(), () => this.getSpecsFolder());
+    this.registerMarkdownPostProcessor((el, ctx) => {
+      const file = this.app.vault.getAbstractFileByPath(ctx.sourcePath);
+      if (!(file instanceof TFile)) return;
+      const projectId = this.app.metadataCache.getFileCache(file)?.frontmatter?.[FM_PROJECT_ID];
+      if (typeof projectId !== "string") return;
+      if (!el.querySelector('img, a[href*="figma.com"]')) return;
+      const disposeImages = this.assetPreview?.render(el);
+      const disposeFigma = el.querySelector('a[href*="figma.com"]') && this.figmaPreview
+        ? this.figmaPreview.render(el, this.figmaPreview.projectScreenshots(projectId))
+        : undefined;
+      const child = new MarkdownRenderChild(el);
+      if (disposeImages) child.register(disposeImages);
+      if (disposeFigma) child.register(disposeFigma);
+      ctx.addChild(child);
+    });
+    this.updatePreviews();
 
     this.addCommand({
       id: "import-project-url",
@@ -93,14 +122,73 @@ export default class LinearSpecReviewPlugin
   }
 
   onunload(): void {
-    // Views are cleaned up by Obsidian; nothing persistent to tear down.
+    this.assetPreview?.stop();
+    this.assetPreview = null;
+    this.figmaPreview?.stop();
+    this.figmaPreview = null;
+  }
+
+  updatePreviews(): void {
+    this.figmaPreview?.stop();
+    this.figmaPreview = this.settings.previewImages ? new FigmaPreview(this, this.imageDownloads) : null;
+    this.assetPreview?.stop();
+    this.assetPreview = this.assetStore
+      ? new AssetPreview(this.assetStore, this.settings.storeAssetsInVault, this.settings.previewImages, this.imageDownloads)
+      : null;
+    this.app.workspace.iterateAllLeaves((leaf) => {
+      if (leaf.view instanceof MarkdownView && leaf.view.file) {
+        const projectId = this.app.metadataCache.getFileCache(leaf.view.file)?.frontmatter?.[FM_PROJECT_ID];
+        if (typeof projectId === "string") leaf.view.previewMode.rerender();
+      }
+      if (leaf.view instanceof CommentsView) leaf.view.rerenderPreviews();
+    });
+  }
+
+  storeAssetsInVault(): boolean {
+    return this.settings.storeAssetsInVault;
+  }
+
+  async saveEmbeddedImage(url: string): Promise<string> {
+    if (!this.assetStore) throw new Error("Linear image store is unavailable.");
+    const image = await this.assetStore.load(url, true);
+    if (!image.vaultPath) throw new Error("Linear image was not saved in the vault.");
+    return image.vaultPath;
+  }
+
+  getFigmaScreenshots(projectId: string): Promise<Map<string, string>> {
+    return getProjectFigmaScreenshots(this.app, this.getSecretName(), projectId);
+  }
+
+  async loadFigmaScreenshot(url: string): Promise<StoredImage> {
+    if (!this.assetStore) throw new Error("Linear image store is unavailable.");
+    return this.assetStore.load(url, this.settings.storeAssetsInVault);
+  }
+
+  renderCommentImages(el: HTMLElement, screenshots: ReadonlyMap<string, string>): () => void {
+    const disposeImages = this.assetPreview?.render(el);
+    const disposeFigma = screenshots.size > 0 ? this.figmaPreview?.render(el, screenshots) : undefined;
+    return () => {
+      disposeFigma?.();
+      disposeImages?.();
+    };
   }
 
   // --- Settings persistence -------------------------------------------------
 
   async loadSettings(): Promise<void> {
     const data = (await this.loadData()) as Partial<PluginSettings> | null;
-    this.settings = { ...DEFAULT_SETTINGS, ...(data ?? {}) };
+    this.settings = {
+      secretName:
+        typeof data?.secretName === "string"
+          ? data.secretName
+          : DEFAULT_SETTINGS.secretName,
+      specsFolder:
+        typeof data?.specsFolder === "string"
+          ? data.specsFolder
+          : DEFAULT_SETTINGS.specsFolder,
+      storeAssetsInVault: data?.storeAssetsInVault === true,
+      previewImages: data?.previewImages !== false,
+    };
   }
 
   async saveSettings(): Promise<void> {
@@ -154,7 +242,13 @@ export default class LinearSpecReviewPlugin
     return file;
   }
 
-  async onImported(_file: TFile): Promise<void> {
+  async onImported(file: TFile, projectId: string): Promise<void> {
+    this.figmaPreview?.invalidateProject(projectId);
+    this.app.workspace.iterateAllLeaves((leaf) => {
+      if (leaf.view instanceof MarkdownView && leaf.view.file?.path === file.path) {
+        leaf.view.previewMode.rerender();
+      }
+    });
     await this.activateCommentsView();
     await this.refreshCommentsView();
   }

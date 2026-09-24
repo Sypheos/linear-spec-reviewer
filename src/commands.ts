@@ -7,18 +7,26 @@ import {
   TFile,
   normalizePath,
 } from "obsidian";
+import { posix } from "node:path";
 import { ProjectOverview, ProjectSearchResult } from "./types";
 import { getProjectById, searchProjects } from "./linear/queries";
 import { resolveProjectFromUrl } from "./linear/parseUrl";
-import { buildNote, sanitizeFileName } from "./render/overview";
+import {
+  buildNote,
+  embeddedLinearImages,
+  linkLocalImages,
+  sanitizeFileName,
+} from "./render/overview";
 
 /** Minimal surface the commands need from the plugin. */
 export interface CommandHost {
   app: App;
   getSecretName(): string;
   getSpecsFolder(): string;
+  storeAssetsInVault(): boolean;
+  saveEmbeddedImage(url: string): Promise<string>;
   /** Called after a note is imported so the plugin can reveal/refresh the panel. */
-  onImported(file: TFile): Promise<void>;
+  onImported(file: TFile, projectId: string): Promise<void>;
 }
 
 function errorMessage(e: unknown): string {
@@ -161,7 +169,15 @@ export async function writeProjectNote(
     });
   }
 
-  const content = buildNote(project);
+  let content = buildNote(project);
+  if (host.storeAssetsInVault()) {
+    const paths = new Map<string, string>();
+    for (const url of embeddedLinearImages(content)) {
+      const assetPath = await host.saveEmbeddedImage(url);
+      paths.set(url, posix.relative(posix.dirname(path), assetPath));
+    }
+    content = linkLocalImages(content, paths);
+  }
   const existing = app.vault.getAbstractFileByPath(path);
   if (existing instanceof TFile) {
     await app.vault.modify(existing, content);
@@ -183,7 +199,7 @@ export async function importByUrl(host: CommandHost, url: string): Promise<void>
     const project = await getProjectById(host.app, secretName, match.id);
     const file = await writeProjectNote(host, project);
     await host.app.workspace.getLeaf(false).openFile(file);
-    await host.onImported(file);
+    await host.onImported(file, project.id);
     new Notice(`Imported "${project.name}".`);
   } catch (e) {
     new Notice(errorMessage(e));
@@ -200,7 +216,7 @@ export async function importByProject(
     const project = await getProjectById(host.app, secretName, projectId);
     const file = await writeProjectNote(host, project);
     await host.app.workspace.getLeaf(false).openFile(file);
-    await host.onImported(file);
+    await host.onImported(file, project.id);
     new Notice(`Imported "${project.name}".`);
   } catch (e) {
     new Notice(errorMessage(e));
