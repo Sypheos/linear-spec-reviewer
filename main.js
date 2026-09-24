@@ -260,6 +260,49 @@ function errorMessage(e) {
 function authorName(comment) {
   return comment.author?.name ?? comment.botActorName ?? "Unknown";
 }
+function threadStatus(thread) {
+  return thread.root.resolvedAt !== null ? "resolved" : "open";
+}
+function participantKey(comment) {
+  if (comment.author !== null) {
+    return `user:${comment.author.id}`;
+  }
+  if (comment.botActorName !== null) {
+    return `bot:${comment.botActorName}`;
+  }
+  return "unknown:unknown";
+}
+function threadComments(thread) {
+  return [thread.root, ...thread.replies];
+}
+function buildParticipantsList(threads) {
+  const byKey = /* @__PURE__ */ new Map();
+  for (const thread of threads) {
+    const seenInThread = /* @__PURE__ */ new Set();
+    for (const c of threadComments(thread)) {
+      const key = participantKey(c);
+      if (seenInThread.has(key)) {
+        continue;
+      }
+      seenInThread.add(key);
+      const existing = byKey.get(key);
+      if (existing !== void 0) {
+        existing.threadCount += 1;
+      } else {
+        byKey.set(key, {
+          participant: { key, name: authorName(c) },
+          threadCount: 1
+        });
+      }
+    }
+  }
+  return Array.from(byKey.values()).sort((a, b) => {
+    if (b.threadCount !== a.threadCount) {
+      return b.threadCount - a.threadCount;
+    }
+    return a.participant.name.localeCompare(b.participant.name);
+  });
+}
 function formatTimestamp(iso) {
   const d = new Date(iso);
   if (Number.isNaN(d.getTime())) {
@@ -267,11 +310,259 @@ function formatTimestamp(iso) {
   }
   return d.toLocaleString();
 }
+function normalizeChar(ch) {
+  switch (ch) {
+    case "\u2018":
+    // ‘
+    case "\u2019":
+    // ’
+    case "\u201B":
+      return "'";
+    case "\u201C":
+    // “
+    case "\u201D":
+    // ”
+    case "\u201F":
+      return '"';
+    case "\u2013":
+    // – en dash
+    case "\u2014":
+      return "-";
+    case "\u2026":
+      return ".";
+    default:
+      return ch;
+  }
+}
+function buildStripped(raw) {
+  let stripped = "";
+  const rawOffsets = [];
+  let i = 0;
+  const n = raw.length;
+  while (i < n) {
+    const ch = raw[i];
+    if (ch === "`") {
+      let j = i + 1;
+      while (j < n && raw[j] === "`") {
+        j++;
+      }
+      i = j;
+      continue;
+    }
+    if (ch === "*" || ch === "_") {
+      let j = i + 1;
+      while (j < n && raw[j] === ch && j - i < 3) {
+        j++;
+      }
+      i = j;
+      continue;
+    }
+    if (ch === "\\" && i + 1 < n) {
+      const next = normalizeChar(raw[i + 1]);
+      stripped += next;
+      rawOffsets.push(i);
+      i += 2;
+      continue;
+    }
+    stripped += normalizeChar(ch);
+    rawOffsets.push(i);
+    i++;
+  }
+  rawOffsets.push(n);
+  return { stripped, rawOffsets };
+}
+function findAllInMarkdown(raw, needle) {
+  if (needle.length === 0) {
+    return [];
+  }
+  const verbatim = [];
+  let searchFrom = 0;
+  for (; ; ) {
+    const at = raw.indexOf(needle, searchFrom);
+    if (at === -1) {
+      break;
+    }
+    verbatim.push({ from: at, to: at + needle.length });
+    searchFrom = at + needle.length;
+  }
+  if (verbatim.length > 0) {
+    return verbatim;
+  }
+  const { stripped, rawOffsets } = buildStripped(raw);
+  let normalizedNeedle = "";
+  for (const ch of needle) {
+    normalizedNeedle += normalizeChar(ch);
+  }
+  if (normalizedNeedle.length === 0) {
+    return [];
+  }
+  const matches = [];
+  let strippedFrom = 0;
+  for (; ; ) {
+    const idx = stripped.indexOf(normalizedNeedle, strippedFrom);
+    if (idx === -1) {
+      break;
+    }
+    const from = rawOffsets[idx];
+    const to = rawOffsets[idx + normalizedNeedle.length];
+    if (from !== void 0 && to !== void 0) {
+      matches.push({ from, to });
+    }
+    strippedFrom = idx + normalizedNeedle.length;
+  }
+  return matches;
+}
+function findAllInRenderedText(container, needle) {
+  if (needle.length === 0) {
+    return [];
+  }
+  const walker = document.createTreeWalker(container, NodeFilter.SHOW_TEXT);
+  const nodes = [];
+  const nodeStarts = [];
+  let text = "";
+  let node;
+  while ((node = walker.nextNode()) !== null) {
+    const textNode = node;
+    nodeStarts.push(text.length);
+    text += textNode.data;
+    nodes.push(textNode);
+  }
+  function resolve(charIndex) {
+    for (let i = 0; i < nodes.length; i++) {
+      const start = nodeStarts[i];
+      const len = nodes[i].data.length;
+      if (charIndex <= start + len) {
+        return { node: nodes[i], offset: charIndex - start };
+      }
+    }
+    return null;
+  }
+  function rangeFor(from, to) {
+    const start = resolve(from);
+    const end = resolve(to);
+    if (start === null || end === null) {
+      return null;
+    }
+    const range = document.createRange();
+    range.setStart(start.node, start.offset);
+    range.setEnd(end.node, end.offset);
+    return range;
+  }
+  function collect(haystack, term) {
+    const ranges = [];
+    let searchFrom = 0;
+    for (; ; ) {
+      const at = haystack.indexOf(term, searchFrom);
+      if (at === -1) {
+        break;
+      }
+      const range = rangeFor(at, at + term.length);
+      if (range !== null) {
+        ranges.push(range);
+      }
+      searchFrom = at + term.length;
+    }
+    return ranges;
+  }
+  const verbatim = collect(text, needle);
+  if (verbatim.length > 0) {
+    return verbatim;
+  }
+  let normalizedText = "";
+  for (const ch of text) {
+    normalizedText += normalizeChar(ch);
+  }
+  let normalizedNeedle = "";
+  for (const ch of needle) {
+    normalizedNeedle += normalizeChar(ch);
+  }
+  if (normalizedNeedle.length === 0) {
+    return [];
+  }
+  return collect(normalizedText, normalizedNeedle);
+}
+async function waitForRenderedMatches(container, needle, timeoutMs = 800, intervalMs = 40) {
+  const deadline = Date.now() + timeoutMs;
+  let ranges = findAllInRenderedText(container, needle);
+  while (ranges.length === 0 && Date.now() < deadline) {
+    await new Promise((resolve) => setTimeout(resolve, intervalMs));
+    ranges = findAllInRenderedText(container, needle);
+  }
+  return ranges;
+}
+function applyPreviewHighlight(range) {
+  const mark = document.createElement("mark");
+  mark.className = "lsr-preview-highlight";
+  mark.appendChild(range.extractContents());
+  range.insertNode(mark);
+  return mark;
+}
+function clearPreviewHighlight(mark) {
+  if (mark === null) {
+    return;
+  }
+  const parent = mark.parentNode;
+  if (parent === null) {
+    return;
+  }
+  while (mark.firstChild !== null) {
+    parent.insertBefore(mark.firstChild, mark);
+  }
+  parent.removeChild(mark);
+  parent.normalize();
+}
 var CommentsView = class extends import_obsidian2.ItemView {
   constructor(leaf, plugin) {
     super(leaf);
     this.bodyEl = null;
     this.headerTitleEl = null;
+    /**
+     * Raw markdown of the active note captured at the last refresh. Occurrence
+     * counts and click navigation both resolve against this snapshot so they stay
+     * consistent between the rendered badges and clicks. Refreshed by `refresh()`.
+     */
+    this.noteContentSnapshot = null;
+    /**
+     * Next occurrence index to reveal for a given inline comment, keyed by comment
+     * id. Advances (and wraps) on each click so repeated clicks cycle through all
+     * matches. Reset whenever the body is re-rendered.
+     */
+    this.occurrenceIndex = /* @__PURE__ */ new Map();
+    /**
+     * The `<mark>` element currently highlighting a quoted-text match in the
+     * note's Reading View (persistent, unlike Live Preview/Source mode which only
+     * gets a transient CM6 selection). Null when nothing is highlighted or the
+     * note isn't in Reading View. Cleared before applying a new highlight and on
+     * `refresh()`.
+     */
+    this.activePreviewHighlight = null;
+    /**
+     * Watches the Reading View container for re-renders (Obsidian prunes/rebuilds
+     * sections that scroll far out of view for large notes) and reapplies
+     * `activePreviewHighlight` if it gets removed, so the highlight stays "live"
+     * even after scrolling away and back. Disconnected before starting a new
+     * highlight, on `refresh()`, and when the view closes.
+     */
+    this.activePreviewHighlightWatcher = null;
+    // --- Filtering state (client-side; never triggers a re-fetch) ------------
+    /** Threads last fetched from Linear, cached so filter toggles re-render locally. */
+    this.lastThreads = null;
+    /** Context for the cached threads (used by section renderers). */
+    this.lastCtx = null;
+    /** Container for the filter bar, rebuilt whenever filters or data change. */
+    this.filterBarEl = null;
+    /** Statuses currently hidden. Empty = show all. */
+    this.excludedStatuses = /* @__PURE__ */ new Set();
+    /**
+     * Participant keys explicitly selected to filter by (opt-in). Empty = no
+     * filter applied, show everyone's threads. Non-empty = only show threads
+     * where at least one participant (root or reply author) is in this set.
+     */
+    this.includedPeople = /* @__PURE__ */ new Set();
+    /** Project id the current filter state applies to; filters reset on change. */
+    this.filterProjectId = null;
+    /** Whether the people checklist is expanded. */
+    this.peopleFilterExpanded = false;
     this.host = plugin;
   }
   getViewType() {
@@ -288,18 +579,21 @@ var CommentsView = class extends import_obsidian2.ItemView {
     await this.refresh();
   }
   async onClose() {
+    this.activePreviewHighlightWatcher?.disconnect();
+    this.activePreviewHighlightWatcher = null;
     this.contentEl.empty();
   }
   /** Public entry point used by the plugin when the active leaf changes or via command. */
   async reload() {
     await this.refresh();
   }
-  /** Build the persistent shell (header + body container) once per open. */
+  /** Build the persistent shell (header + filter bar + body container) once per open. */
   renderShell() {
     const root = this.contentEl;
     root.empty();
     root.addClass("lsr-comments-view");
-    const header = root.createDiv({ cls: "lsr-header" });
+    const sticky = root.createDiv({ cls: "lsr-sticky" });
+    const header = sticky.createDiv({ cls: "lsr-header" });
     this.headerTitleEl = header.createDiv({ cls: "lsr-header-title" });
     const actions = header.createDiv({ cls: "lsr-header-actions" });
     const refreshBtn = actions.createEl("button", {
@@ -320,6 +614,7 @@ var CommentsView = class extends import_obsidian2.ItemView {
     newBtn.addEventListener("click", () => {
       this.focusNewThreadComposer();
     });
+    this.filterBarEl = sticky.createDiv({ cls: "lsr-filter-bar" });
     this.bodyEl = root.createDiv({ cls: "lsr-body" });
   }
   /** Reload comments live from Linear and re-render the body. */
@@ -332,6 +627,15 @@ var CommentsView = class extends import_obsidian2.ItemView {
       return;
     }
     body.empty();
+    this.noteContentSnapshot = null;
+    this.occurrenceIndex.clear();
+    this.activePreviewHighlightWatcher?.disconnect();
+    this.activePreviewHighlightWatcher = null;
+    clearPreviewHighlight(this.activePreviewHighlight);
+    this.activePreviewHighlight = null;
+    this.lastThreads = null;
+    this.lastCtx = null;
+    this.clearFilterBar();
     const ctx = this.host.getActiveContext();
     this.setHeaderTitle(ctx !== null ? ctx.projectName : "No Linear note active");
     if (ctx === null) {
@@ -339,7 +643,14 @@ var CommentsView = class extends import_obsidian2.ItemView {
         cls: "lsr-empty",
         text: "Open an imported Linear spec note to see its comments."
       });
+      this.host.notifyCommentsLoaded(null);
       return;
+    }
+    if (this.filterProjectId !== ctx.projectId) {
+      this.excludedStatuses.clear();
+      this.includedPeople.clear();
+      this.peopleFilterExpanded = false;
+      this.filterProjectId = ctx.projectId;
     }
     const secretName = this.host.getSecretName();
     body.createDiv({ cls: "lsr-loading", text: "Loading comments\u2026" });
@@ -358,14 +669,181 @@ var CommentsView = class extends import_obsidian2.ItemView {
       return;
     }
     body.empty();
-    const grouped = this.groupComments(comments);
-    this.renderInlineSection(body, grouped.inline, ctx);
-    this.renderDiscussionSection(body, grouped.discussion, ctx);
+    const activeFile = this.host.getActiveFile();
+    if (activeFile !== null) {
+      try {
+        this.noteContentSnapshot = await this.host.app.vault.read(activeFile);
+      } catch (e) {
+        this.noteContentSnapshot = null;
+        console.debug(
+          "[linear-spec-review] note read for occurrence counts failed:",
+          errorMessage(e)
+        );
+      }
+    }
+    this.lastThreads = this.groupComments(comments);
+    this.lastCtx = ctx;
+    this.renderFilterBar();
+    this.renderFilteredBody();
+    this.host.notifyCommentsLoaded(ctx.projectId);
   }
   setHeaderTitle(text) {
     if (this.headerTitleEl !== null) {
       this.headerTitleEl.setText(text);
     }
+  }
+  // --- Filtering -----------------------------------------------------------
+  /** Empty the filter bar (used while loading / when there is no data). */
+  clearFilterBar() {
+    if (this.filterBarEl !== null) {
+      this.filterBarEl.empty();
+    }
+  }
+  /** All threads (inline + discussion) from the cached fetch. */
+  allThreads() {
+    if (this.lastThreads === null) {
+      return [];
+    }
+    return [...this.lastThreads.inline, ...this.lastThreads.discussion];
+  }
+  /** True when the thread survives the current status + people filters. */
+  threadPassesFilters(thread) {
+    if (this.excludedStatuses.has(threadStatus(thread))) {
+      return false;
+    }
+    if (this.includedPeople.size > 0) {
+      const anyIncluded = threadComments(thread).some(
+        (c) => this.includedPeople.has(participantKey(c))
+      );
+      if (!anyIncluded) {
+        return false;
+      }
+    }
+    return true;
+  }
+  isFilterActive() {
+    return this.excludedStatuses.size > 0 || this.includedPeople.size > 0;
+  }
+  /** (Re)build the filter bar from the cached threads and current filter state. */
+  renderFilterBar() {
+    const bar = this.filterBarEl;
+    if (bar === null) {
+      return;
+    }
+    bar.empty();
+    const threads = this.allThreads();
+    if (threads.length === 0) {
+      return;
+    }
+    const statusRow = bar.createDiv({ cls: "lsr-filter-row" });
+    statusRow.createSpan({ cls: "lsr-filter-label", text: "Status" });
+    const openCount = threads.filter((t) => threadStatus(t) === "open").length;
+    const resolvedCount = threads.length - openCount;
+    this.renderStatusChip(statusRow, "open", "Open", openCount);
+    this.renderStatusChip(statusRow, "resolved", "Resolved", resolvedCount);
+    const participants = buildParticipantsList(threads);
+    if (participants.length > 0) {
+      const peopleRow = bar.createDiv({ cls: "lsr-filter-row" });
+      const toggle = peopleRow.createEl("button", {
+        cls: "lsr-filter-people-toggle",
+        attr: { type: "button" }
+      });
+      const selectedPeople = this.includedPeople.size;
+      const label = selectedPeople > 0 ? `People (${selectedPeople} selected)` : `People (${participants.length})`;
+      (0, import_obsidian2.setIcon)(toggle, this.peopleFilterExpanded ? "chevron-down" : "chevron-right");
+      toggle.createSpan({ text: label });
+      toggle.addEventListener("click", () => {
+        this.peopleFilterExpanded = !this.peopleFilterExpanded;
+        this.renderFilterBar();
+      });
+      if (this.peopleFilterExpanded) {
+        const list = bar.createDiv({ cls: "lsr-people-list" });
+        for (const { participant, threadCount } of participants) {
+          this.renderPersonRow(list, participant, threadCount);
+        }
+      }
+    }
+    if (this.isFilterActive()) {
+      const resetRow = bar.createDiv({ cls: "lsr-filter-row lsr-filter-reset-row" });
+      const resetBtn = resetRow.createEl("button", {
+        cls: "lsr-btn lsr-filter-reset",
+        attr: { type: "button" }
+      });
+      (0, import_obsidian2.setIcon)(resetBtn, "x");
+      resetBtn.createSpan({ text: "Clear filters" });
+      resetBtn.addEventListener("click", () => {
+        this.excludedStatuses.clear();
+        this.includedPeople.clear();
+        this.renderFilterBar();
+        this.renderFilteredBody();
+      });
+    }
+  }
+  renderStatusChip(container, status, label, count) {
+    const excluded = this.excludedStatuses.has(status);
+    const chip = container.createEl("button", {
+      cls: `lsr-filter-chip${excluded ? "" : " is-active"}`,
+      attr: {
+        type: "button",
+        "aria-pressed": excluded ? "false" : "true"
+      }
+    });
+    chip.createSpan({ text: label });
+    chip.createSpan({ cls: "lsr-filter-chip-count", text: String(count) });
+    chip.addEventListener("click", () => {
+      if (excluded) {
+        this.excludedStatuses.delete(status);
+      } else {
+        this.excludedStatuses.add(status);
+      }
+      this.renderFilterBar();
+      this.renderFilteredBody();
+    });
+  }
+  renderPersonRow(container, participant, threadCount) {
+    const selected = this.includedPeople.has(participant.key);
+    const row = container.createEl("label", { cls: "lsr-person-row" });
+    const checkbox = row.createEl("input", {
+      attr: { type: "checkbox" }
+    });
+    checkbox.checked = selected;
+    row.createSpan({ cls: "lsr-person-name", text: participant.name });
+    row.createSpan({ cls: "lsr-person-count", text: String(threadCount) });
+    checkbox.addEventListener("change", () => {
+      if (checkbox.checked) {
+        this.includedPeople.add(participant.key);
+      } else {
+        this.includedPeople.delete(participant.key);
+      }
+      this.renderFilterBar();
+      this.renderFilteredBody();
+    });
+  }
+  /** Render the body sections from cached threads, applying current filters. */
+  renderFilteredBody() {
+    const body = this.bodyEl;
+    const ctx = this.lastCtx;
+    if (body === null || ctx === null || this.lastThreads === null) {
+      return;
+    }
+    body.empty();
+    this.occurrenceIndex.clear();
+    const inline = this.lastThreads.inline.filter(
+      (t) => this.threadPassesFilters(t)
+    );
+    const discussion = this.lastThreads.discussion.filter(
+      (t) => this.threadPassesFilters(t)
+    );
+    const totalThreads = this.allThreads().length;
+    const visibleThreads = inline.length + discussion.length;
+    if (this.isFilterActive() && totalThreads > 0 && visibleThreads === 0) {
+      body.createDiv({
+        cls: "lsr-empty",
+        text: `No comments match the current filters (${totalThreads} hidden).`
+      });
+    }
+    this.renderInlineSection(body, inline, ctx, this.noteContentSnapshot);
+    this.renderDiscussionSection(body, discussion, ctx);
   }
   /**
    * Group a flat list of comments into inline/discussion threads.
@@ -425,7 +903,7 @@ var CommentsView = class extends import_obsidian2.ItemView {
     }
     return { inline, discussion };
   }
-  renderInlineSection(container, threads, ctx) {
+  renderInlineSection(container, threads, ctx, content) {
     const section = container.createDiv({ cls: "lsr-section lsr-inline-section" });
     section.createEl("h3", { cls: "lsr-section-title", text: "Inline comments" });
     if (threads.length === 0) {
@@ -436,7 +914,28 @@ var CommentsView = class extends import_obsidian2.ItemView {
       const threadEl = section.createDiv({ cls: "lsr-thread lsr-inline-thread" });
       const quoted = thread.root.quotedText;
       if (quoted !== null && quoted.length > 0) {
-        threadEl.createDiv({ cls: "lsr-quoted", text: quoted });
+        const quotedEl = threadEl.createDiv({
+          cls: "lsr-quoted lsr-quoted-clickable"
+        });
+        quotedEl.createSpan({ cls: "lsr-quoted-text", text: quoted });
+        const occurrences = content !== null ? findAllInMarkdown(content, quoted).length : 0;
+        let badgeEl = null;
+        if (occurrences > 1) {
+          badgeEl = quotedEl.createSpan({
+            cls: "lsr-occurrence-badge",
+            text: `1 / ${occurrences}`
+          });
+          quotedEl.setAttr(
+            "title",
+            "Click to jump to this text; click again for the next occurrence"
+          );
+        } else {
+          quotedEl.setAttr("title", "Click to jump to this text in the note");
+        }
+        const commentId = thread.root.id;
+        quotedEl.addEventListener("click", () => {
+          void this.scrollEditorToQuotedText(quoted, commentId, badgeEl);
+        });
       }
       this.renderThreadBodies(threadEl, thread, ctx);
     }
@@ -519,7 +1018,7 @@ var CommentsView = class extends import_obsidian2.ItemView {
     button.disabled = true;
     textarea.disabled = true;
     try {
-      await replyToThread(
+      const reply = await replyToThread(
         this.host.app,
         this.host.getSecretName(),
         ctx.documentContentId,
@@ -527,7 +1026,7 @@ var CommentsView = class extends import_obsidian2.ItemView {
         body
       );
       new import_obsidian2.Notice("Reply posted.");
-      await this.refresh();
+      this.patchReplyIntoCache(parentId, reply);
     } catch (e) {
       new import_obsidian2.Notice(errorMessage(e));
       button.disabled = false;
@@ -559,19 +1058,61 @@ var CommentsView = class extends import_obsidian2.ItemView {
     button.disabled = true;
     textarea.disabled = true;
     try {
-      await createThread(
+      const created = await createThread(
         this.host.app,
         this.host.getSecretName(),
         ctx.documentContentId,
         body
       );
       new import_obsidian2.Notice("Comment posted.");
-      await this.refresh();
+      this.patchNewThreadIntoCache(created);
     } catch (e) {
       new import_obsidian2.Notice(errorMessage(e));
       button.disabled = false;
       textarea.disabled = false;
     }
+  }
+  /**
+   * Insert a freshly-posted reply into the cached thread list and re-render
+   * locally, instead of re-fetching every comment from Linear. The mutation
+   * already returns the fully-mapped comment, so there is nothing left to
+   * fetch. Falls back to a full `refresh()` if the parent thread cannot be
+   * found in the cache (should not normally happen).
+   */
+  patchReplyIntoCache(parentId, reply) {
+    if (this.lastThreads === null) {
+      void this.refresh();
+      return;
+    }
+    const thread = this.allThreads().find((t) => t.root.id === parentId);
+    if (thread === void 0) {
+      void this.refresh();
+      return;
+    }
+    thread.replies.push(reply);
+    thread.replies.sort((a, b) => a.createdAt.localeCompare(b.createdAt));
+    this.renderFilterBar();
+    this.renderFilteredBody();
+  }
+  /**
+   * Insert a freshly-posted top-level thread into the cached discussion list
+   * and re-render locally (see {@link patchReplyIntoCache}). The new-thread
+   * composer never sets `quotedText`, so this always creates a discussion
+   * thread; new threads are sorted newest-first, so it is unshifted to match.
+   */
+  patchNewThreadIntoCache(created) {
+    if (this.lastThreads === null) {
+      void this.refresh();
+      return;
+    }
+    const thread = {
+      root: created,
+      replies: [],
+      isInline: created.quotedText !== null
+    };
+    this.lastThreads.discussion.unshift(thread);
+    this.renderFilterBar();
+    this.renderFilteredBody();
   }
   /** Scroll to and focus the new-thread composer (used by the header button). */
   focusNewThreadComposer() {
@@ -588,7 +1129,171 @@ var CommentsView = class extends import_obsidian2.ItemView {
       new import_obsidian2.Notice("Open a Linear spec note to add a comment.");
     }
   }
+  /**
+   * Locate an inline comment's `quotedText` in the active note and reveal it in
+   * the editor: select the matched range and scroll it into view.
+   *
+   * When the snippet occurs multiple times, repeated clicks cycle through each
+   * occurrence (wrapping around), advancing `occurrenceIndex` per comment and
+   * updating the `x / N` badge. Matches resolve against `noteContentSnapshot`
+   * (captured at the last refresh) so the count shown on the badge and the
+   * navigation stay consistent; if no snapshot exists it reads once as a
+   * fallback.
+   *
+   * All editor interaction goes through Obsidian's stable `Editor` API — no CM6
+   * internals.
+   */
+  async scrollEditorToQuotedText(quoted, commentId, badgeEl) {
+    const file = this.host.getActiveFile();
+    if (file === null) {
+      new import_obsidian2.Notice("Open the Linear spec note to jump to quoted text.");
+      return;
+    }
+    const workspace = this.host.app.workspace;
+    const mdLeaf = workspace.getLeavesOfType("markdown").find((leaf) => {
+      const view2 = leaf.view;
+      return view2 instanceof import_obsidian2.MarkdownView && view2.file?.path === file.path;
+    });
+    if (mdLeaf === void 0 || !(mdLeaf.view instanceof import_obsidian2.MarkdownView)) {
+      new import_obsidian2.Notice("Open the Linear spec note in a pane to jump to quoted text.");
+      return;
+    }
+    const view = mdLeaf.view;
+    let content = this.noteContentSnapshot;
+    if (content === null) {
+      try {
+        content = await this.host.app.vault.read(file);
+      } catch (e) {
+        new import_obsidian2.Notice(`Could not read the note: ${errorMessage(e)}`);
+        return;
+      }
+    }
+    const matches = findAllInMarkdown(content, quoted);
+    if (matches.length === 0) {
+      new import_obsidian2.Notice("Could not locate the quoted text in this note.");
+      return;
+    }
+    const total = matches.length;
+    const current = this.occurrenceIndex.get(commentId) ?? 0;
+    const index = current % total;
+    this.occurrenceIndex.set(commentId, (index + 1) % total);
+    if (badgeEl !== null) {
+      badgeEl.setText(`${index + 1} / ${total}`);
+    }
+    const match = matches[index];
+    const fromPos = offsetToPosition(content, match.from);
+    const toPos = offsetToPosition(content, match.to);
+    this.host.app.workspace.setActiveLeaf(mdLeaf, { focus: true });
+    if (view.getMode() !== "source") {
+      const previewScrolled = this.scrollPreviewToLine(view, fromPos.line);
+      await this.applyReadingViewHighlight(view, quoted, index);
+      if (!previewScrolled) {
+        new import_obsidian2.Notice(
+          "Switch the note to editing view to jump to the quoted text."
+        );
+      }
+      return;
+    }
+    const editor = view.editor;
+    try {
+      editor.setSelection(fromPos, toPos);
+      editor.scrollIntoView({ from: fromPos, to: toPos }, true);
+    } catch (e) {
+      console.debug(
+        "[linear-spec-review] editor reveal raised (non-fatal):",
+        errorMessage(e)
+      );
+    }
+  }
+  /**
+   * Scroll a markdown view's rendered preview (reading mode) to a line.
+   *
+   * Obsidian's reading view has no `Editor`, but `MarkdownView.setEphemeralState`
+   * accepts a `{ line }` and scrolls the preview to it — the same mechanism used
+   * when following a link into a note. Returns false if the API is unavailable.
+   */
+  scrollPreviewToLine(view, line) {
+    try {
+      view.setEphemeralState({ line });
+      return true;
+    } catch (e) {
+      console.debug(
+        "[linear-spec-review] preview scroll raised (non-fatal):",
+        errorMessage(e)
+      );
+      return false;
+    }
+  }
+  /**
+   * Persistently highlight the exact occurrence of `quoted` in the note's
+   * Reading View. Clears any previous highlight first so only one is ever
+   * active. Best-effort: if the rendered text doesn't yield the expected
+   * occurrence (e.g. a rare mismatch between raw-markdown and rendered-text
+   * matching), this silently no-ops — the scroll-to-line still succeeded.
+   *
+   * Reading View incrementally (re)renders only a window of the document
+   * around the current scroll position for larger notes — it is not fully
+   * static — so the target text may not exist in the DOM yet immediately
+   * after triggering the scroll. This polls briefly for it to appear.
+   */
+  async applyReadingViewHighlight(view, quoted, occurrenceIndex) {
+    this.activePreviewHighlightWatcher?.disconnect();
+    this.activePreviewHighlightWatcher = null;
+    clearPreviewHighlight(this.activePreviewHighlight);
+    this.activePreviewHighlight = null;
+    const container = view.previewMode?.containerEl;
+    if (container === void 0) {
+      return;
+    }
+    try {
+      const ranges = await waitForRenderedMatches(container, quoted);
+      const range = ranges[occurrenceIndex] ?? ranges[0];
+      if (range === void 0) {
+        return;
+      }
+      this.activePreviewHighlight = applyPreviewHighlight(range);
+      this.watchPreviewHighlight(container, quoted, occurrenceIndex);
+    } catch (e) {
+      console.debug(
+        "[linear-spec-review] preview highlight raised (non-fatal):",
+        errorMessage(e)
+      );
+    }
+  }
+  /**
+   * Reapply the highlight if Obsidian's Reading View prunes/rebuilds the
+   * section it lives in (this happens when the user scrolls far enough away
+   * and back, for large notes — see {@link waitForRenderedMatches}). Without
+   * this, the highlight would only survive until the next such re-render.
+   */
+  watchPreviewHighlight(container, quoted, occurrenceIndex) {
+    const observer = new MutationObserver(() => {
+      if (this.activePreviewHighlight?.isConnected === true) {
+        return;
+      }
+      const ranges = findAllInRenderedText(container, quoted);
+      const range = ranges[occurrenceIndex] ?? ranges[0];
+      if (range === void 0) {
+        return;
+      }
+      this.activePreviewHighlight = applyPreviewHighlight(range);
+    });
+    observer.observe(container, { childList: true, subtree: true });
+    this.activePreviewHighlightWatcher = observer;
+  }
 };
+function offsetToPosition(content, offset) {
+  const clamped = Math.max(0, Math.min(offset, content.length));
+  let line = 0;
+  let lineStart = 0;
+  for (let i = 0; i < clamped; i++) {
+    if (content[i] === "\n") {
+      line++;
+      lineStart = i + 1;
+    }
+  }
+  return { line, ch: clamped - lineStart };
+}
 
 // src/settings.ts
 var import_obsidian3 = require("obsidian");
@@ -891,6 +1596,13 @@ var LinearSpecReviewPlugin = class extends import_obsidian5.Plugin {
   constructor() {
     super(...arguments);
     this.settings = DEFAULT_SETTINGS;
+    /**
+     * Project id the comments panel last loaded for. Used to avoid re-fetching
+     * comments on every `active-leaf-change` (e.g. focusing out and clicking back
+     * into the panel). We only reload when the active note's project actually
+     * changes; manual Refresh remains the explicit way to re-fetch the same note.
+     */
+    this.lastLoadedProjectId = null;
   }
   async onload() {
     await this.loadSettings();
@@ -931,7 +1643,7 @@ var LinearSpecReviewPlugin = class extends import_obsidian5.Plugin {
     });
     this.registerEvent(
       this.app.workspace.on("active-leaf-change", () => {
-        void this.refreshCommentsView();
+        void this.syncCommentsViewOnLeafChange();
       })
     );
   }
@@ -971,6 +1683,14 @@ var LinearSpecReviewPlugin = class extends import_obsidian5.Plugin {
     const projectName = typeof fm["name"] === "string" ? fm["name"] : file.basename;
     return { projectId, documentContentId, projectName };
   }
+  /** The active markdown note file, or null when no markdown file is active. */
+  getActiveFile() {
+    const file = this.app.workspace.getActiveFile();
+    if (file === null || file.extension !== "md") {
+      return null;
+    }
+    return file;
+  }
   async onImported(_file) {
     await this.activateCommentsView();
     await this.refreshCommentsView();
@@ -990,6 +1710,28 @@ var LinearSpecReviewPlugin = class extends import_obsidian5.Plugin {
     await leaf.setViewState({ type: LINEAR_COMMENTS_VIEW, active: true });
     this.app.workspace.revealLeaf(leaf);
   }
+  /**
+   * Reload the panel on `active-leaf-change`, but only when the active note's
+   * Linear project differs from what the panel last loaded. This prevents a
+   * live re-fetch every time focus moves (e.g. clicking back into the panel).
+   *
+   * The active-leaf context is only considered when the active leaf is an
+   * actual note, so focusing the panel itself (which reports no active file)
+   * never clears or reloads the currently displayed comments.
+   */
+  async syncCommentsViewOnLeafChange() {
+    if (this.app.workspace.getLeavesOfType(LINEAR_COMMENTS_VIEW).length === 0) {
+      return;
+    }
+    const ctx = this.getActiveContext();
+    if (ctx === null) {
+      return;
+    }
+    if (ctx.projectId === this.lastLoadedProjectId) {
+      return;
+    }
+    await this.refreshCommentsView();
+  }
   async refreshCommentsView() {
     const leaves = this.app.workspace.getLeavesOfType(LINEAR_COMMENTS_VIEW);
     for (const leaf of leaves) {
@@ -998,5 +1740,13 @@ var LinearSpecReviewPlugin = class extends import_obsidian5.Plugin {
         await view.reload();
       }
     }
+  }
+  /**
+   * Called by the comments view whenever it finishes (re)loading, reporting the
+   * project id it now reflects. Recorded so leaf-change syncs can skip reloads
+   * when the active note's project is already displayed.
+   */
+  notifyCommentsLoaded(projectId) {
+    this.lastLoadedProjectId = projectId;
   }
 };

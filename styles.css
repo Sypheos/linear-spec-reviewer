@@ -2,17 +2,20 @@
   padding: 0;
 }
 
+.lsr-sticky {
+  position: sticky;
+  top: 0;
+  background: var(--background-primary);
+  z-index: 1;
+  border-bottom: 1px solid var(--background-modifier-border);
+}
+
 .lsr-header {
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 8px;
   padding: 10px 12px;
-  border-bottom: 1px solid var(--background-modifier-border);
-  position: sticky;
-  top: 0;
-  background: var(--background-primary);
-  z-index: 1;
 }
 
 .lsr-header-title {
@@ -34,6 +37,120 @@
   align-items: center;
   gap: 4px;
   cursor: pointer;
+}
+
+.lsr-filter-bar {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 0 12px 10px;
+}
+
+.lsr-filter-bar:empty {
+  display: none;
+}
+
+.lsr-filter-row {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.lsr-filter-label {
+  font-size: var(--font-ui-smaller);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--text-muted);
+  margin-right: 2px;
+}
+
+.lsr-filter-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 2px 8px;
+  border-radius: 12px;
+  border: 1px solid var(--background-modifier-border);
+  background: var(--background-primary);
+  color: var(--text-muted);
+  font-size: var(--font-ui-smaller);
+  cursor: pointer;
+}
+
+.lsr-filter-chip.is-active {
+  border-color: var(--interactive-accent);
+  background: var(--interactive-accent);
+  color: var(--text-on-accent);
+}
+
+.lsr-filter-chip:not(.is-active) {
+  text-decoration: line-through;
+  opacity: 0.7;
+}
+
+.lsr-filter-chip-count {
+  font-variant-numeric: tabular-nums;
+  opacity: 0.85;
+}
+
+.lsr-filter-people-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 6px;
+  border: none;
+  background: transparent;
+  color: var(--text-normal);
+  font-size: var(--font-ui-smaller);
+  cursor: pointer;
+  box-shadow: none;
+}
+
+.lsr-people-list {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  max-height: 220px;
+  overflow-y: auto;
+  padding: 4px 6px;
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 6px;
+  background: var(--background-secondary);
+}
+
+.lsr-person-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 2px 2px;
+  cursor: pointer;
+  font-size: var(--font-ui-smaller);
+}
+
+.lsr-person-row input {
+  flex-shrink: 0;
+}
+
+.lsr-person-name {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.lsr-person-count {
+  color: var(--text-faint);
+  font-variant-numeric: tabular-nums;
+}
+
+.lsr-filter-reset-row {
+  margin-top: 2px;
+}
+
+.lsr-filter-reset {
+  font-size: var(--font-ui-smaller);
+  color: var(--text-muted);
 }
 
 .lsr-body {
@@ -87,6 +204,34 @@
   background: var(--background-primary-alt);
   border-radius: 0 4px 4px 0;
   white-space: pre-wrap;
+}
+
+.lsr-quoted-clickable {
+  cursor: pointer;
+  transition: background 0.1s ease, color 0.1s ease;
+}
+
+.lsr-quoted-clickable:hover {
+  color: var(--text-normal);
+  background: var(--background-modifier-hover);
+}
+
+.lsr-quoted-text {
+  white-space: pre-wrap;
+}
+
+.lsr-occurrence-badge {
+  display: inline-block;
+  margin-left: 6px;
+  padding: 0 6px;
+  border-radius: 8px;
+  font-size: var(--font-smallest);
+  font-style: normal;
+  font-variant-numeric: tabular-nums;
+  color: var(--text-muted);
+  background: var(--background-modifier-border);
+  vertical-align: middle;
+  white-space: nowrap;
 }
 
 .lsr-comment {
@@ -161,4 +306,17 @@
 
 .lsr-settings-error {
   color: var(--text-error);
+}
+
+/*
+ * Persistent Reading View highlight for the text an inline comment is
+ * anchored to. Reading View is static rendered HTML (no CM6), so this mark
+ * is not wiped by re-renders the way an injected editor decoration would be.
+ * Uses Obsidian's native highlight color for a look consistent with the
+ * built-in `==highlight==` markdown syntax.
+ */
+.lsr-preview-highlight {
+  background-color: var(--text-highlight-bg, rgba(255, 208, 0, 0.4));
+  color: inherit;
+  border-radius: 2px;
 }

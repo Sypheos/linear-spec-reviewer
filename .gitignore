@@ -1,0 +1,6 @@
+node_modules/
+# main.js is the built artifact Obsidian loads. Keep it committed so the plugin
+# is installable without a build step. Remove the next line if you prefer to gitignore it.
+# main.js
+*.log
+.DS_Store

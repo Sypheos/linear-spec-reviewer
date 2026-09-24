@@ -27,6 +27,14 @@ export default class LinearSpecReviewPlugin
 {
   settings: PluginSettings = DEFAULT_SETTINGS;
 
+  /**
+   * Project id the comments panel last loaded for. Used to avoid re-fetching
+   * comments on every `active-leaf-change` (e.g. focusing out and clicking back
+   * into the panel). We only reload when the active note's project actually
+   * changes; manual Refresh remains the explicit way to re-fetch the same note.
+   */
+  private lastLoadedProjectId: string | null = null;
+
   async onload(): Promise<void> {
     await this.loadSettings();
 
@@ -74,10 +82,12 @@ export default class LinearSpecReviewPlugin
       },
     });
 
-    // Keep the panel in sync when the user switches notes.
+    // Reload the panel only when the active note's Linear project changes.
+    // Switching focus within the same note (or clicking inside the panel) must
+    // not trigger a live re-fetch; use manual Refresh for that.
     this.registerEvent(
       this.app.workspace.on("active-leaf-change", () => {
-        void this.refreshCommentsView();
+        void this.syncCommentsViewOnLeafChange();
       })
     );
   }
@@ -135,6 +145,15 @@ export default class LinearSpecReviewPlugin
     return { projectId, documentContentId, projectName };
   }
 
+  /** The active markdown note file, or null when no markdown file is active. */
+  getActiveFile(): TFile | null {
+    const file = this.app.workspace.getActiveFile();
+    if (file === null || file.extension !== "md") {
+      return null;
+    }
+    return file;
+  }
+
   async onImported(_file: TFile): Promise<void> {
     await this.activateCommentsView();
     await this.refreshCommentsView();
@@ -157,6 +176,33 @@ export default class LinearSpecReviewPlugin
     this.app.workspace.revealLeaf(leaf);
   }
 
+  /**
+   * Reload the panel on `active-leaf-change`, but only when the active note's
+   * Linear project differs from what the panel last loaded. This prevents a
+   * live re-fetch every time focus moves (e.g. clicking back into the panel).
+   *
+   * The active-leaf context is only considered when the active leaf is an
+   * actual note, so focusing the panel itself (which reports no active file)
+   * never clears or reloads the currently displayed comments.
+   */
+  private async syncCommentsViewOnLeafChange(): Promise<void> {
+    if (this.app.workspace.getLeavesOfType(LINEAR_COMMENTS_VIEW).length === 0) {
+      return;
+    }
+
+    const ctx = this.getActiveContext();
+    // Ignore leaf changes that don't correspond to a note (e.g. focusing the
+    // panel or a non-markdown view). Keep showing whatever is loaded.
+    if (ctx === null) {
+      return;
+    }
+
+    if (ctx.projectId === this.lastLoadedProjectId) {
+      return;
+    }
+    await this.refreshCommentsView();
+  }
+
   private async refreshCommentsView(): Promise<void> {
     const leaves = this.app.workspace.getLeavesOfType(LINEAR_COMMENTS_VIEW);
     for (const leaf of leaves) {
@@ -165,5 +211,14 @@ export default class LinearSpecReviewPlugin
         await view.reload();
       }
     }
+  }
+
+  /**
+   * Called by the comments view whenever it finishes (re)loading, reporting the
+   * project id it now reflects. Recorded so leaf-change syncs can skip reloads
+   * when the active note's project is already displayed.
+   */
+  notifyCommentsLoaded(projectId: string | null): void {
+    this.lastLoadedProjectId = projectId;
   }
 }
