@@ -7,6 +7,7 @@ import {
   Component,
   setIcon,
 } from "obsidian";
+import { figmaFrameKey } from "../linear/figma";
 import {
   LinearComment,
   CommentThread,
@@ -1034,7 +1035,13 @@ export class CommentsView extends ItemView {
       bodyEl,
       "",
       this as Component
-    ).catch((e: unknown) => {
+    ).then(() => {
+      bodyEl.querySelectorAll<HTMLAnchorElement>("a[href]").forEach((link) => {
+        const key = figmaFrameKey(link.href);
+        const screenshot = key ? comment.figmaScreenshots.get(key) : null;
+        if (screenshot) link.dataset.lsrFigmaScreenshot = screenshot;
+      });
+    }).catch((e: unknown) => {
       bodyEl.setText(comment.body);
       new Notice(`Failed to render comment: ${errorMessage(e)}`);
     });

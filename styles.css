@@ -281,6 +281,24 @@
   margin-bottom: 0;
 }
 
+.lsr-figma-preview:not([hidden]) {
+  display: block;
+  margin: 8px 0;
+}
+
+.lsr-figma-preview img {
+  display: block;
+  max-width: 100%;
+  max-height: 640px;
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 6px;
+}
+
+.lsr-figma-preview {
+  color: var(--text-muted);
+  font-size: var(--font-ui-smaller);
+}
+
 .lsr-reply-box {
   display: flex;
   flex-direction: column;

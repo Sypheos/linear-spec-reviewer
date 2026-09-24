@@ -1,5 +1,6 @@
 import { App } from "obsidian";
 import { linearRequest, LinearError } from "./gql";
+import { commentFigmaScreenshots, figmaScreenshots } from "./figma";
 import {
   ProjectOverview,
   ProjectSearchResult,
@@ -29,6 +30,7 @@ const PROJECT_FIELDS = `
 const COMMENT_FIELDS = `
   id
   body
+  bodyData
   url
   createdAt
   resolvedAt
@@ -61,6 +63,7 @@ interface RawProject {
 interface RawComment {
   id: string;
   body: string;
+  bodyData: string | null;
   url: string;
   createdAt: string;
   resolvedAt: string | null;
@@ -96,6 +99,7 @@ function mapComment(c: RawComment): LinearComment {
   return {
     id: c.id,
     body: c.body,
+    figmaScreenshots: commentFigmaScreenshots(c.bodyData),
     url: c.url,
     createdAt: c.createdAt,
     resolvedAt: c.resolvedAt,
@@ -139,6 +143,22 @@ export async function getProjectById(
     { id }
   );
   return mapProject(data.project);
+}
+
+/** Fetch screenshot URLs for Figma frames in the project's Linear editor state. */
+export async function getProjectFigmaScreenshots(
+  app: App,
+  secretName: string,
+  projectId: string
+): Promise<Map<string, string>> {
+  const query = `query($id: String!) {
+    project(id: $id) { documentContent { contentState } }
+  }`;
+  const data = await linearRequest<{
+    project: { documentContent: { contentState: string | null } | null } | null;
+  }>(app, secretName, query, { id: projectId });
+  const state = data.project?.documentContent?.contentState;
+  return state ? figmaScreenshots(state) : new Map();
 }
 
 /** Fetch all comments on a project's overview (up to 250). */

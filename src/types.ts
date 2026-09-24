@@ -48,6 +48,8 @@ export interface LinearComment {
   id: string;
   /** Markdown body of the comment. */
   body: string;
+  /** Figma frame screenshot URLs extracted from Linear's rich comment body. */
+  figmaScreenshots: ReadonlyMap<string, string>;
   url: string;
   createdAt: string;
   /** Non-null when the thread is resolved (read-only badge). */

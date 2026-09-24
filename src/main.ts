@@ -14,6 +14,9 @@ import {
 import { assertSecretStorage } from "./linear/gql";
 import { AssetStore } from "./linear/assets";
 import { AssetPreview } from "./render/assetPreview";
+import { FigmaPreview } from "./render/figmaPreview";
+import { getProjectFigmaScreenshots } from "./linear/queries";
+import { StoredImage } from "./linear/assets";
 import { CommentsView, CommentsHost } from "./view/CommentsView";
 import { LinearSettingTab, SettingsHost } from "./settings";
 import {
@@ -37,6 +40,7 @@ export default class LinearSpecReviewPlugin
    */
   private lastLoadedProjectId: string | null = null;
   private assetPreview: AssetPreview | null = null;
+  private figmaPreview: FigmaPreview | null = null;
   private assetStore: AssetStore | null = null;
 
   async onload(): Promise<void> {
@@ -61,6 +65,7 @@ export default class LinearSpecReviewPlugin
     this.addSettingTab(new LinearSettingTab(this.app, this));
     this.assetStore = new AssetStore(this.app, () => this.getSecretName(), () => this.getSpecsFolder());
     this.updateAssetPreview();
+    this.figmaPreview = new FigmaPreview(this);
 
     this.addCommand({
       id: "import-project-url",
@@ -101,6 +106,8 @@ export default class LinearSpecReviewPlugin
   onunload(): void {
     this.assetPreview?.stop();
     this.assetPreview = null;
+    this.figmaPreview?.stop();
+    this.figmaPreview = null;
   }
 
   updateAssetPreview(): void {
@@ -119,6 +126,15 @@ export default class LinearSpecReviewPlugin
     const image = await this.assetStore.load(url, true);
     if (!image.vaultPath) throw new Error("Linear image was not saved in the vault.");
     return image.vaultPath;
+  }
+
+  getFigmaScreenshots(projectId: string): Promise<Map<string, string>> {
+    return getProjectFigmaScreenshots(this.app, this.getSecretName(), projectId);
+  }
+
+  async loadFigmaScreenshot(url: string): Promise<StoredImage> {
+    if (!this.assetStore) throw new Error("Linear image store is unavailable.");
+    return this.assetStore.load(url, this.settings.storeAssetsInVault);
   }
 
   // --- Settings persistence -------------------------------------------------
