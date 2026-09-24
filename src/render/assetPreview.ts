@@ -1,108 +1,125 @@
-import { App, MarkdownView, Notice } from "obsidian";
+import { Notice } from "obsidian";
 import { AssetStore } from "../linear/assets";
-import { FM_PROJECT_ID, LINEAR_COMMENTS_VIEW } from "../types";
+import { ImageDownloads } from "./imageDownloads";
 
-/** In-memory previews for authenticated Linear uploads; never writes to the vault. */
+interface CachedUrl {
+  promise: Promise<string>;
+  readers: number;
+}
+
+/** Renders authenticated Linear uploads only within a known spec or comment body. */
 export class AssetPreview {
-  private readonly objectUrls = new Map<string, Promise<string>>();
-  private readonly observer: MutationObserver;
+  private readonly objectUrls = new Map<string, CachedUrl>();
+  private readonly disposers = new Set<() => void>();
+  private readonly pending = new Map<Element, () => void>();
+  private readonly observer: IntersectionObserver;
   private active = true;
 
   constructor(
-    private readonly app: App,
     private readonly store: AssetStore,
-    private readonly inVault: () => boolean
+    private readonly inVault: boolean,
+    private readonly previewImages: boolean,
+    private readonly downloads: ImageDownloads
   ) {
-    this.observer = new MutationObserver((changes) => {
-      for (const change of changes) {
-        if (change.type === "attributes") {
-          this.checkImage(change.target);
-        } else {
-          change.addedNodes.forEach((node) => this.scan(node));
-        }
+    this.observer = new IntersectionObserver((entries) => {
+      for (const entry of entries) {
+        if (!entry.isIntersecting) continue;
+        this.observer.unobserve(entry.target);
+        const load = this.pending.get(entry.target);
+        this.pending.delete(entry.target);
+        load?.();
       }
+    }, { rootMargin: "300px" });
+  }
+
+  /** The owner disposes this section when Obsidian replaces it. */
+  render(root: HTMLElement): () => void {
+    const cleanups: Array<() => void> = [];
+    root.querySelectorAll<HTMLImageElement>("img[src]").forEach((image) => {
+      if (image.closest(".lsr-figma-preview")) return;
+      const src = image.getAttribute("src");
+      if (!src) return;
+      if (!this.previewImages) {
+        const link = document.createElement("a");
+        link.href = image.dataset.lsrAssetSource ?? src;
+        link.textContent = image.alt || "Open image";
+        link.className = "lsr-image-source-link";
+        image.replaceWith(link);
+        cleanups.push(() => { if (link.isConnected) link.replaceWith(image); });
+        return;
+      }
+      if (!src.startsWith("https://uploads.linear.app/")) return;
+      let released = false;
+      let releaseResource: (() => void) | null = null;
+      const load = async (): Promise<void> => {
+        try {
+          const resource = this.acquire(this.key(src), src);
+          releaseResource = resource.release;
+          const objectUrl = await resource.promise;
+          if (this.active && !released && image.isConnected) image.src = objectUrl;
+        } catch (e) {
+          if (!this.active || released) return;
+          const message = e instanceof Error ? e.message : String(e);
+          console.error("[linear-spec-review] asset preview failed:", message);
+          new Notice(`Linear image could not load: ${message}`);
+        }
+      };
+      this.pending.set(image, () => { void load(); });
+      this.observer.observe(image);
+      cleanups.push(() => {
+        released = true;
+        this.observer.unobserve(image);
+        this.pending.delete(image);
+        releaseResource?.();
+        if (image.isConnected && image.src.startsWith("blob:")) image.src = src;
+      });
     });
-    this.observer.observe(document.body, {
-      childList: true,
-      subtree: true,
-      attributes: true,
-      attributeFilter: ["src"],
-    });
-    this.scan(document.body);
+
+    if (cleanups.length === 0) return () => {};
+    let disposed = false;
+    const dispose = (): void => {
+      if (disposed) return;
+      disposed = true;
+      for (const cleanup of cleanups) cleanup();
+      this.disposers.delete(dispose);
+    };
+    this.disposers.add(dispose);
+    return dispose;
   }
 
   stop(): void {
     this.active = false;
     this.observer.disconnect();
-    // Restore the original URL before releasing object URLs on plugin reload.
-    document.querySelectorAll<HTMLImageElement>("img[data-lsr-asset-source]").forEach((img) => {
-      img.src = img.dataset.lsrAssetSource ?? img.src;
-      delete img.dataset.lsrAssetSource;
-    });
-    for (const pending of this.objectUrls.values()) {
-      void pending.then((url) => URL.revokeObjectURL(url), () => {});
+    for (const dispose of [...this.disposers]) dispose();
+  }
+
+  private key(src: string): string {
+    // Upload signatures expire; the path identifies the file within this storage mode.
+    return `${this.inVault}:${new URL(src).pathname}`;
+  }
+
+  private acquire(key: string, src: string): { promise: Promise<string>; release: () => void } {
+    let entry = this.objectUrls.get(key);
+    if (!entry) {
+      const promise = this.downloads.run(() => {
+        if (!this.active) throw new Error("Image preview stopped");
+        return this.store.load(src, this.inVault);
+      }).then(({ bytes, contentType }) => URL.createObjectURL(new Blob([bytes], { type: contentType })));
+      entry = { promise, readers: 0 };
+      this.objectUrls.set(key, entry);
+      const current = entry;
+      void promise.catch(() => {
+        if (this.objectUrls.get(key) === current) this.objectUrls.delete(key);
+      });
     }
-    this.objectUrls.clear();
+    entry.readers++;
+    const current = entry;
+    return { promise: entry.promise, release: () => this.release(key, current) };
   }
 
-  private scan(node: Node): void {
-    this.checkImage(node);
-    if (node instanceof Element) {
-      node.querySelectorAll("img").forEach((img) => this.checkImage(img));
-    }
-  }
-
-  private checkImage(node: Node): void {
-    if (!(node instanceof HTMLImageElement)) return;
-    if (node.dataset.lsrAssetSource) return;
-    const src = node.getAttribute("src");
-    if (!src?.startsWith("https://uploads.linear.app/")) return;
-    if (!this.isLinearSpecImage(node)) return;
-
-    node.dataset.lsrAssetSource = src;
-    void this.getObjectUrl(src).then((url) => {
-      if (this.active && node.isConnected && node.dataset.lsrAssetSource === src) {
-        node.src = url;
-      }
-    }).catch((e: unknown) => {
-      if (!this.active) return;
-      const message = e instanceof Error ? e.message : String(e);
-      console.error("[linear-spec-review] asset preview failed:", message);
-      new Notice(`Linear image could not load: ${message}`);
-    });
-  }
-
-  private isLinearSpecImage(img: HTMLImageElement): boolean {
-    const inComments = this.app.workspace.getLeavesOfType(LINEAR_COMMENTS_VIEW).some(
-      (leaf) => leaf.view.containerEl.contains(img)
-    );
-    if (inComments) return true;
-
-    let isSpec = false;
-    this.app.workspace.iterateAllLeaves((leaf) => {
-      if (!(leaf.view instanceof MarkdownView) || !leaf.view.containerEl.contains(img)) return;
-      const file = leaf.view.file;
-      if (!file) return;
-      isSpec = typeof this.app.metadataCache.getFileCache(file)?.frontmatter?.[FM_PROJECT_ID] === "string";
-    });
-    return isSpec;
-  }
-
-  private getObjectUrl(src: string): Promise<string> {
-    // The signature changes and expires; the path identifies the asset.
-    const key = `${this.inVault()}:${new URL(src).pathname}`;
-    let pending = this.objectUrls.get(key);
-    if (!pending) {
-      pending = this.store.load(src, this.inVault()).then(
-        ({ bytes, contentType }) => {
-          if (!contentType.startsWith("image/")) {
-            throw new Error(`Unexpected Linear image type: ${contentType || "unknown"}`);
-          }
-          return URL.createObjectURL(new Blob([bytes], { type: contentType }));
-        }
-      );
-      this.objectUrls.set(key, pending);
-    }
-    return pending;
+  private release(key: string, entry: CachedUrl): void {
+    if (--entry.readers > 0) return;
+    if (this.objectUrls.get(key) === entry) this.objectUrls.delete(key);
+    void entry.promise.then((url) => URL.revokeObjectURL(url), () => {});
   }
 }

@@ -7,7 +7,6 @@ import {
   Component,
   setIcon,
 } from "obsidian";
-import { figmaFrameKey } from "../linear/figma";
 import {
   LinearComment,
   CommentThread,
@@ -26,6 +25,7 @@ import {
  */
 export interface CommentsHost {
   app: import("obsidian").App;
+  renderCommentImages(el: HTMLElement, screenshots: ReadonlyMap<string, string>): () => void;
   getSecretName(): string;
   /** Returns the active note's linear context, or null if the active file is not a linear-linked note. */
   getActiveContext(): {
@@ -430,6 +430,11 @@ function clearPreviewHighlight(mark: HTMLElement | null): void {
 export class CommentsView extends ItemView {
   private readonly host: CommentsHost;
   private bodyEl: HTMLElement | null = null;
+  private readonly imageDisposers: Array<() => void> = [];
+
+  private clearImagePreviews(): void {
+    for (const dispose of this.imageDisposers.splice(0)) dispose();
+  }
   private headerTitleEl: HTMLElement | null = null;
   /**
    * Raw markdown of the active note captured at the last refresh. Occurrence
@@ -505,6 +510,7 @@ export class CommentsView extends ItemView {
   }
 
   async onClose(): Promise<void> {
+    this.clearImagePreviews();
     this.activePreviewHighlightWatcher?.disconnect();
     this.activePreviewHighlightWatcher = null;
     this.contentEl.empty();
@@ -513,6 +519,11 @@ export class CommentsView extends ItemView {
   /** Public entry point used by the plugin when the active leaf changes or via command. */
   async reload(): Promise<void> {
     await this.refresh();
+  }
+
+  /** Rebuild displayed comment cards after the image-preview setting changes. */
+  rerenderPreviews(): void {
+    if (this.lastThreads && this.lastCtx) this.renderFilteredBody();
   }
 
   /** Build the persistent shell (header + filter bar + body container) once per open. */
@@ -564,6 +575,7 @@ export class CommentsView extends ItemView {
     if (body === null) {
       return;
     }
+    this.clearImagePreviews();
     body.empty();
 
     // Re-rendering invalidates prior occurrence navigation state and cache.
@@ -618,6 +630,7 @@ export class CommentsView extends ItemView {
       return;
     }
 
+    this.clearImagePreviews();
     body.empty();
 
     // Capture the note's raw markdown once so occurrence counts (badges) and
@@ -818,6 +831,7 @@ export class CommentsView extends ItemView {
     if (body === null || ctx === null || this.lastThreads === null) {
       return;
     }
+    this.clearImagePreviews();
     body.empty();
     // Filtering invalidates prior occurrence navigation indices.
     this.occurrenceIndex.clear();
@@ -1036,11 +1050,9 @@ export class CommentsView extends ItemView {
       "",
       this as Component
     ).then(() => {
-      bodyEl.querySelectorAll<HTMLAnchorElement>("a[href]").forEach((link) => {
-        const key = figmaFrameKey(link.href);
-        const screenshot = key ? comment.figmaScreenshots.get(key) : null;
-        if (screenshot) link.dataset.lsrFigmaScreenshot = screenshot;
-      });
+      if (bodyEl.isConnected) {
+        this.imageDisposers.push(this.host.renderCommentImages(bodyEl, comment.figmaScreenshots));
+      }
     }).catch((e: unknown) => {
       bodyEl.setText(comment.body);
       new Notice(`Failed to render comment: ${errorMessage(e)}`);

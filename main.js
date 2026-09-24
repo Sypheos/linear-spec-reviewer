@@ -23,13 +23,14 @@ __export(main_exports, {
   default: () => LinearSpecReviewPlugin
 });
 module.exports = __toCommonJS(main_exports);
-var import_obsidian8 = require("obsidian");
+var import_obsidian7 = require("obsidian");
 
 // src/types.ts
 var DEFAULT_SETTINGS = {
   secretName: "",
   specsFolder: "Specs",
-  storeAssetsInVault: false
+  storeAssetsInVault: false,
+  previewImages: true
 };
 var LINEAR_COMMENTS_VIEW = "linear-spec-review-comments";
 var FM_PROJECT_ID = "linear_project_id";
@@ -262,100 +263,116 @@ var AssetStore = class {
 // src/render/assetPreview.ts
 var import_obsidian3 = require("obsidian");
 var AssetPreview = class {
-  constructor(app, store, inVault) {
-    this.app = app;
+  constructor(store, inVault, previewImages, downloads) {
     this.store = store;
     this.inVault = inVault;
+    this.previewImages = previewImages;
+    this.downloads = downloads;
     this.objectUrls = /* @__PURE__ */ new Map();
+    this.disposers = /* @__PURE__ */ new Set();
+    this.pending = /* @__PURE__ */ new Map();
     this.active = true;
-    this.observer = new MutationObserver((changes) => {
-      for (const change of changes) {
-        if (change.type === "attributes") {
-          this.checkImage(change.target);
-        } else {
-          change.addedNodes.forEach((node) => this.scan(node));
-        }
+    this.observer = new IntersectionObserver((entries) => {
+      for (const entry of entries) {
+        if (!entry.isIntersecting) continue;
+        this.observer.unobserve(entry.target);
+        const load = this.pending.get(entry.target);
+        this.pending.delete(entry.target);
+        load?.();
       }
+    }, { rootMargin: "300px" });
+  }
+  /** The owner disposes this section when Obsidian replaces it. */
+  render(root) {
+    const cleanups = [];
+    root.querySelectorAll("img[src]").forEach((image) => {
+      if (image.closest(".lsr-figma-preview")) return;
+      const src = image.getAttribute("src");
+      if (!src) return;
+      if (!this.previewImages) {
+        const link = document.createElement("a");
+        link.href = image.dataset.lsrAssetSource ?? src;
+        link.textContent = image.alt || "Open image";
+        link.className = "lsr-image-source-link";
+        image.replaceWith(link);
+        cleanups.push(() => {
+          if (link.isConnected) link.replaceWith(image);
+        });
+        return;
+      }
+      if (!src.startsWith("https://uploads.linear.app/")) return;
+      let released = false;
+      let releaseResource = null;
+      const load = async () => {
+        try {
+          const resource = this.acquire(this.key(src), src);
+          releaseResource = resource.release;
+          const objectUrl = await resource.promise;
+          if (this.active && !released && image.isConnected) image.src = objectUrl;
+        } catch (e) {
+          if (!this.active || released) return;
+          const message = e instanceof Error ? e.message : String(e);
+          console.error("[linear-spec-review] asset preview failed:", message);
+          new import_obsidian3.Notice(`Linear image could not load: ${message}`);
+        }
+      };
+      this.pending.set(image, () => {
+        void load();
+      });
+      this.observer.observe(image);
+      cleanups.push(() => {
+        released = true;
+        this.observer.unobserve(image);
+        this.pending.delete(image);
+        releaseResource?.();
+        if (image.isConnected && image.src.startsWith("blob:")) image.src = src;
+      });
     });
-    this.observer.observe(document.body, {
-      childList: true,
-      subtree: true,
-      attributes: true,
-      attributeFilter: ["src"]
-    });
-    this.scan(document.body);
+    if (cleanups.length === 0) return () => {
+    };
+    let disposed = false;
+    const dispose = () => {
+      if (disposed) return;
+      disposed = true;
+      for (const cleanup of cleanups) cleanup();
+      this.disposers.delete(dispose);
+    };
+    this.disposers.add(dispose);
+    return dispose;
   }
   stop() {
     this.active = false;
     this.observer.disconnect();
-    document.querySelectorAll("img[data-lsr-asset-source]").forEach((img) => {
-      img.src = img.dataset.lsrAssetSource ?? img.src;
-      delete img.dataset.lsrAssetSource;
-    });
-    for (const pending of this.objectUrls.values()) {
-      void pending.then((url) => URL.revokeObjectURL(url), () => {
+    for (const dispose of [...this.disposers]) dispose();
+  }
+  key(src) {
+    return `${this.inVault}:${new URL(src).pathname}`;
+  }
+  acquire(key, src) {
+    let entry = this.objectUrls.get(key);
+    if (!entry) {
+      const promise = this.downloads.run(() => {
+        if (!this.active) throw new Error("Image preview stopped");
+        return this.store.load(src, this.inVault);
+      }).then(({ bytes, contentType }) => URL.createObjectURL(new Blob([bytes], { type: contentType })));
+      entry = { promise, readers: 0 };
+      this.objectUrls.set(key, entry);
+      const current2 = entry;
+      void promise.catch(() => {
+        if (this.objectUrls.get(key) === current2) this.objectUrls.delete(key);
       });
     }
-    this.objectUrls.clear();
+    entry.readers++;
+    const current = entry;
+    return { promise: entry.promise, release: () => this.release(key, current) };
   }
-  scan(node) {
-    this.checkImage(node);
-    if (node instanceof Element) {
-      node.querySelectorAll("img").forEach((img) => this.checkImage(img));
-    }
-  }
-  checkImage(node) {
-    if (!(node instanceof HTMLImageElement)) return;
-    if (node.dataset.lsrAssetSource) return;
-    const src = node.getAttribute("src");
-    if (!src?.startsWith("https://uploads.linear.app/")) return;
-    if (!this.isLinearSpecImage(node)) return;
-    node.dataset.lsrAssetSource = src;
-    void this.getObjectUrl(src).then((url) => {
-      if (this.active && node.isConnected && node.dataset.lsrAssetSource === src) {
-        node.src = url;
-      }
-    }).catch((e) => {
-      if (!this.active) return;
-      const message = e instanceof Error ? e.message : String(e);
-      console.error("[linear-spec-review] asset preview failed:", message);
-      new import_obsidian3.Notice(`Linear image could not load: ${message}`);
+  release(key, entry) {
+    if (--entry.readers > 0) return;
+    if (this.objectUrls.get(key) === entry) this.objectUrls.delete(key);
+    void entry.promise.then((url) => URL.revokeObjectURL(url), () => {
     });
-  }
-  isLinearSpecImage(img) {
-    const inComments = this.app.workspace.getLeavesOfType(LINEAR_COMMENTS_VIEW).some(
-      (leaf) => leaf.view.containerEl.contains(img)
-    );
-    if (inComments) return true;
-    let isSpec = false;
-    this.app.workspace.iterateAllLeaves((leaf) => {
-      if (!(leaf.view instanceof import_obsidian3.MarkdownView) || !leaf.view.containerEl.contains(img)) return;
-      const file = leaf.view.file;
-      if (!file) return;
-      isSpec = typeof this.app.metadataCache.getFileCache(file)?.frontmatter?.[FM_PROJECT_ID] === "string";
-    });
-    return isSpec;
-  }
-  getObjectUrl(src) {
-    const key = `${this.inVault()}:${new URL(src).pathname}`;
-    let pending = this.objectUrls.get(key);
-    if (!pending) {
-      pending = this.store.load(src, this.inVault()).then(
-        ({ bytes, contentType }) => {
-          if (!contentType.startsWith("image/")) {
-            throw new Error(`Unexpected Linear image type: ${contentType || "unknown"}`);
-          }
-          return URL.createObjectURL(new Blob([bytes], { type: contentType }));
-        }
-      );
-      this.objectUrls.set(key, pending);
-    }
-    return pending;
   }
 };
-
-// src/render/figmaPreview.ts
-var import_obsidian4 = require("obsidian");
 
 // node_modules/.pnpm/lib0@0.2.117/node_modules/lib0/map.js
 var create = () => /* @__PURE__ */ new Map();
@@ -7790,127 +7807,127 @@ function addScreenshot(screenshots, value) {
 
 // src/render/figmaPreview.ts
 var FigmaPreview = class {
-  constructor(host) {
+  constructor(host, downloads) {
     this.host = host;
+    this.downloads = downloads;
     this.projects = /* @__PURE__ */ new Map();
-    this.objectUrls = /* @__PURE__ */ new Map();
-    this.waiting = [];
-    this.runningImages = 0;
+    this.disposers = /* @__PURE__ */ new Set();
+    this.pending = /* @__PURE__ */ new Map();
     this.active = true;
-    this.observer = new MutationObserver((changes) => {
-      for (const change of changes) {
-        if (change.type === "attributes") {
-          this.scan(change.target);
-        } else {
-          change.addedNodes.forEach((node) => this.scan(node));
-        }
+    this.observer = new IntersectionObserver((entries) => {
+      for (const entry of entries) {
+        if (!entry.isIntersecting) continue;
+        this.observer.unobserve(entry.target);
+        const load = this.pending.get(entry.target);
+        this.pending.delete(entry.target);
+        load?.();
       }
-      this.releaseDetachedImages();
+    }, { rootMargin: "300px" });
+  }
+  /** The caller owns the returned cleanup; Markdown sections and comments have different lifetimes. */
+  render(root, screenshots) {
+    const previews = [];
+    const links = root.querySelectorAll("a[href]");
+    links.forEach((link) => {
+      const key = figmaFrameKey(link.href);
+      if (!key || link.dataset.lsrFigmaPreview) return;
+      if (screenshots instanceof Map && !screenshots.has(key)) return;
+      const el = document.createElement("span");
+      el.className = "lsr-figma-preview";
+      el.textContent = "Loading design\u2026";
+      link.dataset.lsrFigmaPreview = "true";
+      link.insertAdjacentElement("afterend", el);
+      const preview = { link, el, url: void 0 };
+      previews.push(preview);
+      this.pending.set(el, () => {
+        void this.show(preview, key, Promise.resolve(screenshots));
+      });
+      this.observer.observe(el);
     });
-    this.observer.observe(document.body, {
-      childList: true,
-      subtree: true,
-      attributes: true,
-      attributeFilter: ["data-lsr-figma-screenshot"]
-    });
-    this.scan(document.body);
-  }
-  stop() {
-    this.active = false;
-    this.observer.disconnect();
-    for (const url of this.objectUrls.values()) URL.revokeObjectURL(url);
-    this.objectUrls.clear();
-    document.querySelectorAll(".lsr-figma-preview").forEach((el) => el.remove());
-    document.querySelectorAll("a[data-lsr-figma-preview]").forEach((link) => {
-      delete link.dataset.lsrFigmaPreview;
-    });
-  }
-  scan(node) {
-    if (node instanceof HTMLAnchorElement) this.addPreview(node);
-    if (node instanceof Element) {
-      node.querySelectorAll("a[href]").forEach((link) => this.addPreview(link));
-    }
-  }
-  addPreview(link) {
-    if (link.dataset.lsrFigmaPreview) return;
-    const key = figmaFrameKey(link.href);
-    if (!key) return;
-    const screenshot = this.commentScreenshot(link);
-    const projectId = screenshot ? null : this.projectForLink(link);
-    if (!screenshot && !projectId) return;
-    const preview = document.createElement("span");
-    preview.className = "lsr-figma-preview";
-    preview.textContent = "Loading design\u2026";
-    link.dataset.lsrFigmaPreview = "true";
-    link.insertAdjacentElement("afterend", preview);
-    void this.show(link, preview, key, screenshot, projectId);
-  }
-  commentScreenshot(link) {
-    if (!link.closest(".lsr-comment-body")) return null;
-    const inPanel = this.host.app.workspace.getLeavesOfType(LINEAR_COMMENTS_VIEW).some(
-      (leaf) => leaf.view.containerEl.contains(link)
-    );
-    return inPanel ? link.dataset.lsrFigmaScreenshot ?? null : null;
-  }
-  projectForLink(link) {
-    if (!link.closest(".markdown-preview-view")) return null;
-    let projectId = null;
-    this.host.app.workspace.iterateAllLeaves((leaf) => {
-      if (!(leaf.view instanceof import_obsidian4.MarkdownView) || !leaf.view.containerEl.contains(link)) return;
-      const file = leaf.view.file;
-      if (!file) return;
-      const id2 = this.host.app.metadataCache.getFileCache(file)?.frontmatter?.[FM_PROJECT_ID];
-      if (typeof id2 === "string") projectId = id2;
-    });
-    return projectId;
-  }
-  async show(link, preview, key, commentScreenshot, projectId) {
-    try {
-      const screenshots = projectId ? await this.screenshotsForProject(projectId) : null;
-      const url = commentScreenshot ?? screenshots?.get(key);
-      if (!url) throw new Error("No screenshot in Linear");
-      const image = await this.loadImage(url);
-      if (!this.active || !link.isConnected) return;
-      const objectUrl = URL.createObjectURL(new Blob([image.bytes], { type: image.contentType }));
-      this.objectUrls.set(link, objectUrl);
-      const img = document.createElement("img");
-      img.src = objectUrl;
-      img.alt = `Design preview: ${link.textContent?.trim() || "Figma frame"}`;
-      preview.replaceChildren(img);
-    } catch (e) {
-      if (this.active && link.isConnected) {
-        preview.textContent = "Design preview unavailable";
-        console.debug("[linear-spec-review] Figma screenshot unavailable:", e);
+    if (previews.length === 0) return () => {
+    };
+    let disposed = false;
+    const dispose = () => {
+      if (disposed) return;
+      disposed = true;
+      for (const preview of previews) {
+        this.observer.unobserve(preview.el);
+        this.pending.delete(preview.el);
+        if (preview.url) URL.revokeObjectURL(preview.url);
+        preview.el.remove();
+        delete preview.link.dataset.lsrFigmaPreview;
       }
-    }
+      this.disposers.delete(dispose);
+    };
+    this.disposers.add(dispose);
+    return dispose;
   }
-  async loadImage(url) {
-    if (this.runningImages >= 4) {
-      await new Promise((resolve) => this.waiting.push(resolve));
-    }
-    if (!this.active) throw new Error("Figma preview stopped");
-    this.runningImages++;
-    try {
-      return await this.host.loadFigmaScreenshot(url);
-    } finally {
-      this.runningImages--;
-      this.waiting.shift()?.();
-    }
-  }
-  screenshotsForProject(projectId) {
+  projectScreenshots(projectId) {
     let pending = this.projects.get(projectId);
     if (!pending) {
       pending = this.host.getFigmaScreenshots(projectId);
       this.projects.set(projectId, pending);
-      void pending.catch(() => this.projects.delete(projectId));
+      void pending.catch(() => {
+        if (this.projects.get(projectId) === pending) this.projects.delete(projectId);
+      });
     }
     return pending;
   }
-  releaseDetachedImages() {
-    for (const [link, url] of this.objectUrls) {
-      if (link.isConnected) continue;
-      URL.revokeObjectURL(url);
-      this.objectUrls.delete(link);
+  invalidateProject(projectId) {
+    this.projects.delete(projectId);
+  }
+  stop() {
+    this.active = false;
+    this.observer.disconnect();
+    for (const dispose of [...this.disposers]) dispose();
+    this.projects.clear();
+  }
+  async show(preview, key, screenshots) {
+    try {
+      const url = (await screenshots).get(key);
+      if (!this.active || !preview.el.isConnected) return;
+      if (!url) {
+        preview.el.remove();
+        return;
+      }
+      const image = await this.downloads.run(() => {
+        if (!this.active) throw new Error("Figma preview stopped");
+        return this.host.loadFigmaScreenshot(url);
+      });
+      if (!this.active || !preview.el.isConnected) return;
+      const objectUrl = URL.createObjectURL(new Blob([image.bytes], { type: image.contentType }));
+      preview.url = objectUrl;
+      const img = document.createElement("img");
+      img.src = objectUrl;
+      img.alt = `Design preview: ${preview.link.textContent?.trim() || "Figma frame"}`;
+      preview.el.replaceChildren(img);
+    } catch (e) {
+      if (!this.active || !preview.el.isConnected) return;
+      preview.el.textContent = "Design preview unavailable";
+      console.debug("[linear-spec-review] Figma screenshot unavailable:", e);
+    }
+  }
+};
+
+// src/render/imageDownloads.ts
+var ImageDownloads = class {
+  constructor(limit) {
+    this.running = 0;
+    this.waiting = [];
+    this.limit = limit;
+  }
+  async run(download) {
+    if (this.running >= this.limit) {
+      await new Promise((resume) => this.waiting.push(resume));
+    } else {
+      this.running++;
+    }
+    try {
+      return await download();
+    } finally {
+      const resume = this.waiting.shift();
+      if (resume) resume();
+      else this.running--;
     }
   }
 };
@@ -8058,7 +8075,7 @@ async function replyToThread(app, secretName, documentContentId, parentId, body)
 }
 
 // src/view/CommentsView.ts
-var import_obsidian5 = require("obsidian");
+var import_obsidian4 = require("obsidian");
 function errorMessage(e) {
   return e instanceof Error ? e.message : String(e);
 }
@@ -8316,10 +8333,11 @@ function clearPreviewHighlight(mark) {
   parent.removeChild(mark);
   parent.normalize();
 }
-var CommentsView = class extends import_obsidian5.ItemView {
+var CommentsView = class extends import_obsidian4.ItemView {
   constructor(leaf, plugin) {
     super(leaf);
     this.bodyEl = null;
+    this.imageDisposers = [];
     this.headerTitleEl = null;
     /**
      * Raw markdown of the active note captured at the last refresh. Occurrence
@@ -8370,6 +8388,9 @@ var CommentsView = class extends import_obsidian5.ItemView {
     this.peopleFilterExpanded = false;
     this.host = plugin;
   }
+  clearImagePreviews() {
+    for (const dispose of this.imageDisposers.splice(0)) dispose();
+  }
   getViewType() {
     return LINEAR_COMMENTS_VIEW;
   }
@@ -8384,6 +8405,7 @@ var CommentsView = class extends import_obsidian5.ItemView {
     await this.refresh();
   }
   async onClose() {
+    this.clearImagePreviews();
     this.activePreviewHighlightWatcher?.disconnect();
     this.activePreviewHighlightWatcher = null;
     this.contentEl.empty();
@@ -8391,6 +8413,10 @@ var CommentsView = class extends import_obsidian5.ItemView {
   /** Public entry point used by the plugin when the active leaf changes or via command. */
   async reload() {
     await this.refresh();
+  }
+  /** Rebuild displayed comment cards after the image-preview setting changes. */
+  rerenderPreviews() {
+    if (this.lastThreads && this.lastCtx) this.renderFilteredBody();
   }
   /** Build the persistent shell (header + filter bar + body container) once per open. */
   renderShell() {
@@ -8405,7 +8431,7 @@ var CommentsView = class extends import_obsidian5.ItemView {
       cls: "lsr-btn lsr-refresh-btn",
       attr: { "aria-label": "Refresh", type: "button" }
     });
-    (0, import_obsidian5.setIcon)(refreshBtn, "refresh-cw");
+    (0, import_obsidian4.setIcon)(refreshBtn, "refresh-cw");
     refreshBtn.createSpan({ text: "Refresh" });
     refreshBtn.addEventListener("click", () => {
       void this.refresh();
@@ -8414,7 +8440,7 @@ var CommentsView = class extends import_obsidian5.ItemView {
       cls: "lsr-btn lsr-new-comment-btn",
       attr: { "aria-label": "New comment", type: "button" }
     });
-    (0, import_obsidian5.setIcon)(newBtn, "plus");
+    (0, import_obsidian4.setIcon)(newBtn, "plus");
     newBtn.createSpan({ text: "New comment" });
     newBtn.addEventListener("click", () => {
       this.focusNewThreadComposer();
@@ -8431,6 +8457,7 @@ var CommentsView = class extends import_obsidian5.ItemView {
     if (body === null) {
       return;
     }
+    this.clearImagePreviews();
     body.empty();
     this.noteContentSnapshot = null;
     this.occurrenceIndex.clear();
@@ -8468,11 +8495,12 @@ var CommentsView = class extends import_obsidian5.ItemView {
       );
     } catch (e) {
       const msg = errorMessage(e);
-      new import_obsidian5.Notice(msg);
+      new import_obsidian4.Notice(msg);
       body.empty();
       body.createDiv({ cls: "lsr-error", text: msg });
       return;
     }
+    this.clearImagePreviews();
     body.empty();
     const activeFile = this.host.getActiveFile();
     if (activeFile !== null) {
@@ -8555,7 +8583,7 @@ var CommentsView = class extends import_obsidian5.ItemView {
       });
       const selectedPeople = this.includedPeople.size;
       const label = selectedPeople > 0 ? `People (${selectedPeople} selected)` : `People (${participants.length})`;
-      (0, import_obsidian5.setIcon)(toggle, this.peopleFilterExpanded ? "chevron-down" : "chevron-right");
+      (0, import_obsidian4.setIcon)(toggle, this.peopleFilterExpanded ? "chevron-down" : "chevron-right");
       toggle.createSpan({ text: label });
       toggle.addEventListener("click", () => {
         this.peopleFilterExpanded = !this.peopleFilterExpanded;
@@ -8574,7 +8602,7 @@ var CommentsView = class extends import_obsidian5.ItemView {
         cls: "lsr-btn lsr-filter-reset",
         attr: { type: "button" }
       });
-      (0, import_obsidian5.setIcon)(resetBtn, "x");
+      (0, import_obsidian4.setIcon)(resetBtn, "x");
       resetBtn.createSpan({ text: "Clear filters" });
       resetBtn.addEventListener("click", () => {
         this.excludedStatuses.clear();
@@ -8631,6 +8659,7 @@ var CommentsView = class extends import_obsidian5.ItemView {
     if (body === null || ctx === null || this.lastThreads === null) {
       return;
     }
+    this.clearImagePreviews();
     body.empty();
     this.occurrenceIndex.clear();
     const inline = this.lastThreads.inline.filter(
@@ -8787,21 +8816,19 @@ var CommentsView = class extends import_obsidian5.ItemView {
       meta.createSpan({ cls: "lsr-resolved-badge", text: "Resolved" });
     }
     const bodyEl = commentEl.createDiv({ cls: "lsr-comment-body" });
-    void import_obsidian5.MarkdownRenderer.render(
+    void import_obsidian4.MarkdownRenderer.render(
       this.host.app,
       comment.body,
       bodyEl,
       "",
       this
     ).then(() => {
-      bodyEl.querySelectorAll("a[href]").forEach((link) => {
-        const key = figmaFrameKey(link.href);
-        const screenshot = key ? comment.figmaScreenshots.get(key) : null;
-        if (screenshot) link.dataset.lsrFigmaScreenshot = screenshot;
-      });
+      if (bodyEl.isConnected) {
+        this.imageDisposers.push(this.host.renderCommentImages(bodyEl, comment.figmaScreenshots));
+      }
     }).catch((e) => {
       bodyEl.setText(comment.body);
-      new import_obsidian5.Notice(`Failed to render comment: ${errorMessage(e)}`);
+      new import_obsidian4.Notice(`Failed to render comment: ${errorMessage(e)}`);
     });
   }
   /** Render the reply composer for a thread. */
@@ -8823,7 +8850,7 @@ var CommentsView = class extends import_obsidian5.ItemView {
   async submitReply(textarea, button, parentId, ctx) {
     const body = textarea.value.trim();
     if (body.length === 0) {
-      new import_obsidian5.Notice("Reply cannot be empty.");
+      new import_obsidian4.Notice("Reply cannot be empty.");
       return;
     }
     button.disabled = true;
@@ -8836,10 +8863,10 @@ var CommentsView = class extends import_obsidian5.ItemView {
         parentId,
         body
       );
-      new import_obsidian5.Notice("Reply posted.");
+      new import_obsidian4.Notice("Reply posted.");
       this.patchReplyIntoCache(parentId, reply);
     } catch (e) {
-      new import_obsidian5.Notice(errorMessage(e));
+      new import_obsidian4.Notice(errorMessage(e));
       button.disabled = false;
       textarea.disabled = false;
     }
@@ -8863,7 +8890,7 @@ var CommentsView = class extends import_obsidian5.ItemView {
   async submitNewThread(textarea, button, ctx) {
     const body = textarea.value.trim();
     if (body.length === 0) {
-      new import_obsidian5.Notice("Comment cannot be empty.");
+      new import_obsidian4.Notice("Comment cannot be empty.");
       return;
     }
     button.disabled = true;
@@ -8875,10 +8902,10 @@ var CommentsView = class extends import_obsidian5.ItemView {
         ctx.documentContentId,
         body
       );
-      new import_obsidian5.Notice("Comment posted.");
+      new import_obsidian4.Notice("Comment posted.");
       this.patchNewThreadIntoCache(created);
     } catch (e) {
-      new import_obsidian5.Notice(errorMessage(e));
+      new import_obsidian4.Notice(errorMessage(e));
       button.disabled = false;
       textarea.disabled = false;
     }
@@ -8937,7 +8964,7 @@ var CommentsView = class extends import_obsidian5.ItemView {
       input.scrollIntoView({ block: "center" });
       input.focus();
     } else {
-      new import_obsidian5.Notice("Open a Linear spec note to add a comment.");
+      new import_obsidian4.Notice("Open a Linear spec note to add a comment.");
     }
   }
   /**
@@ -8957,16 +8984,16 @@ var CommentsView = class extends import_obsidian5.ItemView {
   async scrollEditorToQuotedText(quoted, commentId, badgeEl) {
     const file = this.host.getActiveFile();
     if (file === null) {
-      new import_obsidian5.Notice("Open the Linear spec note to jump to quoted text.");
+      new import_obsidian4.Notice("Open the Linear spec note to jump to quoted text.");
       return;
     }
     const workspace = this.host.app.workspace;
     const mdLeaf = workspace.getLeavesOfType("markdown").find((leaf) => {
       const view2 = leaf.view;
-      return view2 instanceof import_obsidian5.MarkdownView && view2.file?.path === file.path;
+      return view2 instanceof import_obsidian4.MarkdownView && view2.file?.path === file.path;
     });
-    if (mdLeaf === void 0 || !(mdLeaf.view instanceof import_obsidian5.MarkdownView)) {
-      new import_obsidian5.Notice("Open the Linear spec note in a pane to jump to quoted text.");
+    if (mdLeaf === void 0 || !(mdLeaf.view instanceof import_obsidian4.MarkdownView)) {
+      new import_obsidian4.Notice("Open the Linear spec note in a pane to jump to quoted text.");
       return;
     }
     const view = mdLeaf.view;
@@ -8975,13 +9002,13 @@ var CommentsView = class extends import_obsidian5.ItemView {
       try {
         content = await this.host.app.vault.read(file);
       } catch (e) {
-        new import_obsidian5.Notice(`Could not read the note: ${errorMessage(e)}`);
+        new import_obsidian4.Notice(`Could not read the note: ${errorMessage(e)}`);
         return;
       }
     }
     const matches = findAllInMarkdown(content, quoted);
     if (matches.length === 0) {
-      new import_obsidian5.Notice("Could not locate the quoted text in this note.");
+      new import_obsidian4.Notice("Could not locate the quoted text in this note.");
       return;
     }
     const total = matches.length;
@@ -8999,7 +9026,7 @@ var CommentsView = class extends import_obsidian5.ItemView {
       const previewScrolled = this.scrollPreviewToLine(view, fromPos.line);
       await this.applyReadingViewHighlight(view, quoted, index);
       if (!previewScrolled) {
-        new import_obsidian5.Notice(
+        new import_obsidian4.Notice(
           "Switch the note to editing view to jump to the quoted text."
         );
       }
@@ -9107,11 +9134,11 @@ function offsetToPosition(content, offset) {
 }
 
 // src/settings.ts
-var import_obsidian6 = require("obsidian");
+var import_obsidian5 = require("obsidian");
 function errorMessage2(e) {
   return e instanceof Error ? e.message : String(e);
 }
-var LinearSettingTab = class extends import_obsidian6.PluginSettingTab {
+var LinearSettingTab = class extends import_obsidian5.PluginSettingTab {
   constructor(app, plugin) {
     super(app, plugin);
     this.plugin = plugin;
@@ -9121,40 +9148,50 @@ var LinearSettingTab = class extends import_obsidian6.PluginSettingTab {
     try {
       await this.plugin.saveSettings();
     } catch (e) {
-      new import_obsidian6.Notice(`Failed to save settings: ${errorMessage2(e)}`);
+      new import_obsidian5.Notice(`Failed to save settings: ${errorMessage2(e)}`);
     }
   }
   display() {
     const { containerEl } = this;
     containerEl.empty();
     const secretStorage = this.app.secretStorage;
-    if (typeof import_obsidian6.SecretComponent === "undefined" || !secretStorage) {
+    if (typeof import_obsidian5.SecretComponent === "undefined" || !secretStorage) {
       containerEl.createEl("p", {
         cls: "lsr-settings-error",
         text: "This plugin requires Obsidian Secret Storage, which is unavailable. Update Obsidian."
       });
       return;
     }
-    new import_obsidian6.Setting(containerEl).setName("Linear API key").setDesc(
+    new import_obsidian5.Setting(containerEl).setName("Connection").setHeading();
+    new import_obsidian5.Setting(containerEl).setName("Linear API key").setDesc(
       "Select or create a secret in Obsidian Secret Storage that holds your Linear personal API key."
     ).addComponent(
-      (el) => new import_obsidian6.SecretComponent(this.app, el).setValue(this.plugin.settings.secretName).onChange(async (value) => {
+      (el) => new import_obsidian5.SecretComponent(this.app, el).setValue(this.plugin.settings.secretName).onChange(async (value) => {
         this.plugin.settings.secretName = value;
-        this.plugin.updateAssetPreview();
+        this.plugin.updatePreviews();
         await this.persist();
       })
     );
-    new import_obsidian6.Setting(containerEl).setName("Specs folder").setDesc("Vault-relative folder where imported specs are written.").addText(
+    new import_obsidian5.Setting(containerEl).setName("Import").setHeading();
+    new import_obsidian5.Setting(containerEl).setName("Specs folder").setDesc("Vault-relative folder where imported specs are written.").addText(
       (text) => text.setPlaceholder("Specs").setValue(this.plugin.settings.specsFolder).onChange(async (value) => {
         const trimmed = value.trim();
         this.plugin.settings.specsFolder = trimmed.length > 0 ? trimmed : "Specs";
         await this.persist();
       })
     );
-    new import_obsidian6.Setting(containerEl).setName("Save Linear images in vault").setDesc("Off: cache images outside the vault (default). On: save images under the specs folder; re-import a spec to make its Markdown point to the saved images. Comments use the same storage choice.").addToggle(
+    new import_obsidian5.Setting(containerEl).setName("Images and previews").setHeading();
+    new import_obsidian5.Setting(containerEl).setName("Show image previews").setDesc("Show images, GIFs, and Linear-hosted Figma screenshots inline in specs and comments. Off: show source links instead.").addToggle(
+      (toggle) => toggle.setValue(this.plugin.settings.previewImages).onChange(async (enabled) => {
+        this.plugin.settings.previewImages = enabled;
+        this.plugin.updatePreviews();
+        await this.persist();
+      })
+    );
+    new import_obsidian5.Setting(containerEl).setName("Save Linear images in vault").setDesc("Off: cache images outside the vault (default). On: save images under the specs folder; re-import a spec to make its Markdown point to the saved images. Comments use the same storage choice.").addToggle(
       (toggle) => toggle.setValue(this.plugin.settings.storeAssetsInVault).onChange(async (enabled) => {
         this.plugin.settings.storeAssetsInVault = enabled;
-        this.plugin.updateAssetPreview();
+        this.plugin.updatePreviews();
         await this.persist();
       })
     );
@@ -9162,7 +9199,7 @@ var LinearSettingTab = class extends import_obsidian6.PluginSettingTab {
 };
 
 // src/commands.ts
-var import_obsidian7 = require("obsidian");
+var import_obsidian6 = require("obsidian");
 var import_node_path2 = require("node:path");
 
 // src/linear/parseUrl.ts
@@ -9277,7 +9314,7 @@ function linkLocalImages(md, paths) {
 function errorMessage3(e) {
   return e instanceof Error ? e.message : String(e);
 }
-var ImportUrlModal = class extends import_obsidian7.Modal {
+var ImportUrlModal = class extends import_obsidian6.Modal {
   constructor(app, onSubmit) {
     super(app);
     this.url = "";
@@ -9286,7 +9323,7 @@ var ImportUrlModal = class extends import_obsidian7.Modal {
   onOpen() {
     const { contentEl } = this;
     contentEl.createEl("h3", { text: "Import Linear project by URL" });
-    new import_obsidian7.Setting(contentEl).setName("Project URL").addText((text) => {
+    new import_obsidian6.Setting(contentEl).setName("Project URL").addText((text) => {
       text.setPlaceholder("https://linear.app/workspace/project/\u2026").onChange((value) => {
         this.url = value;
       });
@@ -9298,14 +9335,14 @@ var ImportUrlModal = class extends import_obsidian7.Modal {
         }
       });
     });
-    new import_obsidian7.Setting(contentEl).addButton(
+    new import_obsidian6.Setting(contentEl).addButton(
       (btn) => btn.setButtonText("Import").setCta().onClick(() => this.submit())
     );
   }
   submit() {
     const value = this.url.trim();
     if (value.length === 0) {
-      new import_obsidian7.Notice("Please paste a Linear project URL.");
+      new import_obsidian6.Notice("Please paste a Linear project URL.");
       return;
     }
     this.close();
@@ -9315,7 +9352,7 @@ var ImportUrlModal = class extends import_obsidian7.Modal {
     this.contentEl.empty();
   }
 };
-var ProjectSuggestModal = class extends import_obsidian7.FuzzySuggestModal {
+var ProjectSuggestModal = class extends import_obsidian6.FuzzySuggestModal {
   constructor(app, loader, onChoose) {
     super(app);
     this.items = [];
@@ -9355,7 +9392,7 @@ var ProjectSuggestModal = class extends import_obsidian7.FuzzySuggestModal {
     try {
       this.items = await this.loader(term);
     } catch (e) {
-      new import_obsidian7.Notice(errorMessage3(e));
+      new import_obsidian6.Notice(errorMessage3(e));
       this.items = [];
     }
     this.updateSuggestions?.();
@@ -9365,8 +9402,8 @@ async function writeProjectNote(host, project) {
   const app = host.app;
   const folder = host.getSpecsFolder().replace(/^\/+|\/+$/g, "") || "Specs";
   const base = sanitizeFileName(project.name) || project.slugId;
-  const path = (0, import_obsidian7.normalizePath)(`${folder}/${base}.md`);
-  const folderPath = (0, import_obsidian7.normalizePath)(folder);
+  const path = (0, import_obsidian6.normalizePath)(`${folder}/${base}.md`);
+  const folderPath = (0, import_obsidian6.normalizePath)(folder);
   if (folder.length > 0 && app.vault.getAbstractFileByPath(folderPath) === null) {
     await app.vault.createFolder(folderPath).catch(() => {
     });
@@ -9381,7 +9418,7 @@ async function writeProjectNote(host, project) {
     content = linkLocalImages(content, paths);
   }
   const existing = app.vault.getAbstractFileByPath(path);
-  if (existing instanceof import_obsidian7.TFile) {
+  if (existing instanceof import_obsidian6.TFile) {
     await app.vault.modify(existing, content);
     return existing;
   }
@@ -9390,7 +9427,7 @@ async function writeProjectNote(host, project) {
 async function importByUrl(host, url) {
   const secretName = host.getSecretName();
   try {
-    new import_obsidian7.Notice("Resolving Linear project\u2026");
+    new import_obsidian6.Notice("Resolving Linear project\u2026");
     const match = await resolveProjectFromUrl(
       host.app,
       secretName,
@@ -9399,10 +9436,10 @@ async function importByUrl(host, url) {
     const project = await getProjectById(host.app, secretName, match.id);
     const file = await writeProjectNote(host, project);
     await host.app.workspace.getLeaf(false).openFile(file);
-    await host.onImported(file);
-    new import_obsidian7.Notice(`Imported "${project.name}".`);
+    await host.onImported(file, project.id);
+    new import_obsidian6.Notice(`Imported "${project.name}".`);
   } catch (e) {
-    new import_obsidian7.Notice(errorMessage3(e));
+    new import_obsidian6.Notice(errorMessage3(e));
   }
 }
 async function importByProject(host, projectId) {
@@ -9411,10 +9448,10 @@ async function importByProject(host, projectId) {
     const project = await getProjectById(host.app, secretName, projectId);
     const file = await writeProjectNote(host, project);
     await host.app.workspace.getLeaf(false).openFile(file);
-    await host.onImported(file);
-    new import_obsidian7.Notice(`Imported "${project.name}".`);
+    await host.onImported(file, project.id);
+    new import_obsidian6.Notice(`Imported "${project.name}".`);
   } catch (e) {
-    new import_obsidian7.Notice(errorMessage3(e));
+    new import_obsidian6.Notice(errorMessage3(e));
   }
 }
 function openBrowseModal(host) {
@@ -9430,7 +9467,7 @@ function openBrowseModal(host) {
 }
 
 // src/main.ts
-var LinearSpecReviewPlugin = class extends import_obsidian8.Plugin {
+var LinearSpecReviewPlugin = class extends import_obsidian7.Plugin {
   constructor() {
     super(...arguments);
     this.settings = DEFAULT_SETTINGS;
@@ -9444,6 +9481,7 @@ var LinearSpecReviewPlugin = class extends import_obsidian8.Plugin {
     this.assetPreview = null;
     this.figmaPreview = null;
     this.assetStore = null;
+    this.imageDownloads = new ImageDownloads(4);
   }
   async onload() {
     await this.loadSettings();
@@ -9451,7 +9489,7 @@ var LinearSpecReviewPlugin = class extends import_obsidian8.Plugin {
       assertSecretStorage(this.app);
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
-      new import_obsidian8.Notice(`Linear Spec Review: ${msg}`);
+      new import_obsidian7.Notice(`Linear Spec Review: ${msg}`);
       console.error("[linear-spec-review]", msg);
     }
     this.registerView(
@@ -9460,8 +9498,20 @@ var LinearSpecReviewPlugin = class extends import_obsidian8.Plugin {
     );
     this.addSettingTab(new LinearSettingTab(this.app, this));
     this.assetStore = new AssetStore(this.app, () => this.getSecretName(), () => this.getSpecsFolder());
-    this.updateAssetPreview();
-    this.figmaPreview = new FigmaPreview(this);
+    this.registerMarkdownPostProcessor((el, ctx) => {
+      const file = this.app.vault.getAbstractFileByPath(ctx.sourcePath);
+      if (!(file instanceof import_obsidian7.TFile)) return;
+      const projectId = this.app.metadataCache.getFileCache(file)?.frontmatter?.[FM_PROJECT_ID];
+      if (typeof projectId !== "string") return;
+      if (!el.querySelector('img, a[href*="figma.com"]')) return;
+      const disposeImages = this.assetPreview?.render(el);
+      const disposeFigma = el.querySelector('a[href*="figma.com"]') && this.figmaPreview ? this.figmaPreview.render(el, this.figmaPreview.projectScreenshots(projectId)) : void 0;
+      const child = new import_obsidian7.MarkdownRenderChild(el);
+      if (disposeImages) child.register(disposeImages);
+      if (disposeFigma) child.register(disposeFigma);
+      ctx.addChild(child);
+    });
+    this.updatePreviews();
     this.addCommand({
       id: "import-project-url",
       name: "Import project overview (URL)",
@@ -9497,9 +9547,18 @@ var LinearSpecReviewPlugin = class extends import_obsidian8.Plugin {
     this.figmaPreview?.stop();
     this.figmaPreview = null;
   }
-  updateAssetPreview() {
+  updatePreviews() {
+    this.figmaPreview?.stop();
+    this.figmaPreview = this.settings.previewImages ? new FigmaPreview(this, this.imageDownloads) : null;
     this.assetPreview?.stop();
-    this.assetPreview = this.assetStore ? new AssetPreview(this.app, this.assetStore, () => this.settings.storeAssetsInVault) : null;
+    this.assetPreview = this.assetStore ? new AssetPreview(this.assetStore, this.settings.storeAssetsInVault, this.settings.previewImages, this.imageDownloads) : null;
+    this.app.workspace.iterateAllLeaves((leaf) => {
+      if (leaf.view instanceof import_obsidian7.MarkdownView && leaf.view.file) {
+        const projectId = this.app.metadataCache.getFileCache(leaf.view.file)?.frontmatter?.[FM_PROJECT_ID];
+        if (typeof projectId === "string") leaf.view.previewMode.rerender();
+      }
+      if (leaf.view instanceof CommentsView) leaf.view.rerenderPreviews();
+    });
   }
   storeAssetsInVault() {
     return this.settings.storeAssetsInVault;
@@ -9517,13 +9576,22 @@ var LinearSpecReviewPlugin = class extends import_obsidian8.Plugin {
     if (!this.assetStore) throw new Error("Linear image store is unavailable.");
     return this.assetStore.load(url, this.settings.storeAssetsInVault);
   }
+  renderCommentImages(el, screenshots) {
+    const disposeImages = this.assetPreview?.render(el);
+    const disposeFigma = screenshots.size > 0 ? this.figmaPreview?.render(el, screenshots) : void 0;
+    return () => {
+      disposeFigma?.();
+      disposeImages?.();
+    };
+  }
   // --- Settings persistence -------------------------------------------------
   async loadSettings() {
     const data = await this.loadData();
     this.settings = {
       secretName: typeof data?.secretName === "string" ? data.secretName : DEFAULT_SETTINGS.secretName,
       specsFolder: typeof data?.specsFolder === "string" ? data.specsFolder : DEFAULT_SETTINGS.specsFolder,
-      storeAssetsInVault: data?.storeAssetsInVault === true
+      storeAssetsInVault: data?.storeAssetsInVault === true,
+      previewImages: data?.previewImages !== false
     };
   }
   async saveSettings() {
@@ -9563,7 +9631,13 @@ var LinearSpecReviewPlugin = class extends import_obsidian8.Plugin {
     }
     return file;
   }
-  async onImported(_file) {
+  async onImported(file, projectId) {
+    this.figmaPreview?.invalidateProject(projectId);
+    this.app.workspace.iterateAllLeaves((leaf) => {
+      if (leaf.view instanceof import_obsidian7.MarkdownView && leaf.view.file?.path === file.path) {
+        leaf.view.previewMode.rerender();
+      }
+    });
     await this.activateCommentsView();
     await this.refreshCommentsView();
   }
@@ -9576,7 +9650,7 @@ var LinearSpecReviewPlugin = class extends import_obsidian8.Plugin {
     }
     const leaf = this.app.workspace.getRightLeaf(false);
     if (leaf === null) {
-      new import_obsidian8.Notice("Could not open the comments panel (no right sidebar).");
+      new import_obsidian7.Notice("Could not open the comments panel (no right sidebar).");
       return;
     }
     await leaf.setViewState({ type: LINEAR_COMMENTS_VIEW, active: true });

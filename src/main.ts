@@ -3,6 +3,8 @@ import {
   WorkspaceLeaf,
   TFile,
   Notice,
+  MarkdownRenderChild,
+  MarkdownView,
 } from "obsidian";
 import {
   PluginSettings,
@@ -15,6 +17,7 @@ import { assertSecretStorage } from "./linear/gql";
 import { AssetStore } from "./linear/assets";
 import { AssetPreview } from "./render/assetPreview";
 import { FigmaPreview } from "./render/figmaPreview";
+import { ImageDownloads } from "./render/imageDownloads";
 import { getProjectFigmaScreenshots } from "./linear/queries";
 import { StoredImage } from "./linear/assets";
 import { CommentsView, CommentsHost } from "./view/CommentsView";
@@ -42,6 +45,7 @@ export default class LinearSpecReviewPlugin
   private assetPreview: AssetPreview | null = null;
   private figmaPreview: FigmaPreview | null = null;
   private assetStore: AssetStore | null = null;
+  private readonly imageDownloads = new ImageDownloads(4);
 
   async onload(): Promise<void> {
     await this.loadSettings();
@@ -64,8 +68,22 @@ export default class LinearSpecReviewPlugin
 
     this.addSettingTab(new LinearSettingTab(this.app, this));
     this.assetStore = new AssetStore(this.app, () => this.getSecretName(), () => this.getSpecsFolder());
-    this.updateAssetPreview();
-    this.figmaPreview = new FigmaPreview(this);
+    this.registerMarkdownPostProcessor((el, ctx) => {
+      const file = this.app.vault.getAbstractFileByPath(ctx.sourcePath);
+      if (!(file instanceof TFile)) return;
+      const projectId = this.app.metadataCache.getFileCache(file)?.frontmatter?.[FM_PROJECT_ID];
+      if (typeof projectId !== "string") return;
+      if (!el.querySelector('img, a[href*="figma.com"]')) return;
+      const disposeImages = this.assetPreview?.render(el);
+      const disposeFigma = el.querySelector('a[href*="figma.com"]') && this.figmaPreview
+        ? this.figmaPreview.render(el, this.figmaPreview.projectScreenshots(projectId))
+        : undefined;
+      const child = new MarkdownRenderChild(el);
+      if (disposeImages) child.register(disposeImages);
+      if (disposeFigma) child.register(disposeFigma);
+      ctx.addChild(child);
+    });
+    this.updatePreviews();
 
     this.addCommand({
       id: "import-project-url",
@@ -110,11 +128,20 @@ export default class LinearSpecReviewPlugin
     this.figmaPreview = null;
   }
 
-  updateAssetPreview(): void {
+  updatePreviews(): void {
+    this.figmaPreview?.stop();
+    this.figmaPreview = this.settings.previewImages ? new FigmaPreview(this, this.imageDownloads) : null;
     this.assetPreview?.stop();
     this.assetPreview = this.assetStore
-      ? new AssetPreview(this.app, this.assetStore, () => this.settings.storeAssetsInVault)
+      ? new AssetPreview(this.assetStore, this.settings.storeAssetsInVault, this.settings.previewImages, this.imageDownloads)
       : null;
+    this.app.workspace.iterateAllLeaves((leaf) => {
+      if (leaf.view instanceof MarkdownView && leaf.view.file) {
+        const projectId = this.app.metadataCache.getFileCache(leaf.view.file)?.frontmatter?.[FM_PROJECT_ID];
+        if (typeof projectId === "string") leaf.view.previewMode.rerender();
+      }
+      if (leaf.view instanceof CommentsView) leaf.view.rerenderPreviews();
+    });
   }
 
   storeAssetsInVault(): boolean {
@@ -137,6 +164,15 @@ export default class LinearSpecReviewPlugin
     return this.assetStore.load(url, this.settings.storeAssetsInVault);
   }
 
+  renderCommentImages(el: HTMLElement, screenshots: ReadonlyMap<string, string>): () => void {
+    const disposeImages = this.assetPreview?.render(el);
+    const disposeFigma = screenshots.size > 0 ? this.figmaPreview?.render(el, screenshots) : undefined;
+    return () => {
+      disposeFigma?.();
+      disposeImages?.();
+    };
+  }
+
   // --- Settings persistence -------------------------------------------------
 
   async loadSettings(): Promise<void> {
@@ -151,6 +187,7 @@ export default class LinearSpecReviewPlugin
           ? data.specsFolder
           : DEFAULT_SETTINGS.specsFolder,
       storeAssetsInVault: data?.storeAssetsInVault === true,
+      previewImages: data?.previewImages !== false,
     };
   }
 
@@ -205,7 +242,13 @@ export default class LinearSpecReviewPlugin
     return file;
   }
 
-  async onImported(_file: TFile): Promise<void> {
+  async onImported(file: TFile, projectId: string): Promise<void> {
+    this.figmaPreview?.invalidateProject(projectId);
+    this.app.workspace.iterateAllLeaves((leaf) => {
+      if (leaf.view instanceof MarkdownView && leaf.view.file?.path === file.path) {
+        leaf.view.previewMode.rerender();
+      }
+    });
     await this.activateCommentsView();
     await this.refreshCommentsView();
   }

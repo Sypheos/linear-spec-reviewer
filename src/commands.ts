@@ -26,7 +26,7 @@ export interface CommandHost {
   storeAssetsInVault(): boolean;
   saveEmbeddedImage(url: string): Promise<string>;
   /** Called after a note is imported so the plugin can reveal/refresh the panel. */
-  onImported(file: TFile): Promise<void>;
+  onImported(file: TFile, projectId: string): Promise<void>;
 }
 
 function errorMessage(e: unknown): string {
@@ -199,7 +199,7 @@ export async function importByUrl(host: CommandHost, url: string): Promise<void>
     const project = await getProjectById(host.app, secretName, match.id);
     const file = await writeProjectNote(host, project);
     await host.app.workspace.getLeaf(false).openFile(file);
-    await host.onImported(file);
+    await host.onImported(file, project.id);
     new Notice(`Imported "${project.name}".`);
   } catch (e) {
     new Notice(errorMessage(e));
@@ -216,7 +216,7 @@ export async function importByProject(
     const project = await getProjectById(host.app, secretName, projectId);
     const file = await writeProjectNote(host, project);
     await host.app.workspace.getLeaf(false).openFile(file);
-    await host.onImported(file);
+    await host.onImported(file, project.id);
     new Notice(`Imported "${project.name}".`);
   } catch (e) {
     new Notice(errorMessage(e));

@@ -83,12 +83,15 @@ export interface PluginSettings {
   specsFolder: string;
   /** Store authenticated images in the vault; false keeps them in a local OS cache. */
   storeAssetsInVault: boolean;
+  /** Render images and Linear-hosted Figma screenshots inline. */
+  previewImages: boolean;
 }
 
 export const DEFAULT_SETTINGS: PluginSettings = {
   secretName: "",
   specsFolder: "Specs",
   storeAssetsInVault: false,
+  previewImages: true,
 };
 
 export const LINEAR_COMMENTS_VIEW = "linear-spec-review-comments";

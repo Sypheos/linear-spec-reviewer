@@ -14,7 +14,7 @@ import { PluginSettings } from "./types";
 export interface SettingsHost {
   settings: PluginSettings;
   saveSettings(): Promise<void>;
-  updateAssetPreview(): void;
+  updatePreviews(): void;
 }
 
 /** Extract a human message from an unknown thrown value. */
@@ -55,6 +55,8 @@ export class LinearSettingTab extends PluginSettingTab {
       return;
     }
 
+    new Setting(containerEl).setName("Connection").setHeading();
+
     new Setting(containerEl)
       .setName("Linear API key")
       .setDesc(
@@ -65,10 +67,12 @@ export class LinearSettingTab extends PluginSettingTab {
           .setValue(this.plugin.settings.secretName)
           .onChange(async (value: string) => {
             this.plugin.settings.secretName = value;
-            this.plugin.updateAssetPreview();
+            this.plugin.updatePreviews();
             await this.persist();
           })
       );
+
+    new Setting(containerEl).setName("Import").setHeading();
 
     new Setting(containerEl)
       .setName("Specs folder")
@@ -85,13 +89,26 @@ export class LinearSettingTab extends PluginSettingTab {
           })
       );
 
+    new Setting(containerEl).setName("Images and previews").setHeading();
+
+    new Setting(containerEl)
+      .setName("Show image previews")
+      .setDesc("Show images, GIFs, and Linear-hosted Figma screenshots inline in specs and comments. Off: show source links instead.")
+      .addToggle((toggle) =>
+        toggle.setValue(this.plugin.settings.previewImages).onChange(async (enabled) => {
+          this.plugin.settings.previewImages = enabled;
+          this.plugin.updatePreviews();
+          await this.persist();
+        })
+      );
+
     new Setting(containerEl)
       .setName("Save Linear images in vault")
       .setDesc("Off: cache images outside the vault (default). On: save images under the specs folder; re-import a spec to make its Markdown point to the saved images. Comments use the same storage choice.")
       .addToggle((toggle) =>
         toggle.setValue(this.plugin.settings.storeAssetsInVault).onChange(async (enabled) => {
           this.plugin.settings.storeAssetsInVault = enabled;
-          this.plugin.updateAssetPreview();
+          this.plugin.updatePreviews();
           await this.persist();
         })
       );
