@@ -12,6 +12,8 @@ import {
   FM_DOCUMENT_CONTENT_ID,
 } from "./types";
 import { assertSecretStorage } from "./linear/gql";
+import { AssetStore } from "./linear/assets";
+import { AssetPreview } from "./render/assetPreview";
 import { CommentsView, CommentsHost } from "./view/CommentsView";
 import { LinearSettingTab, SettingsHost } from "./settings";
 import {
@@ -34,6 +36,8 @@ export default class LinearSpecReviewPlugin
    * changes; manual Refresh remains the explicit way to re-fetch the same note.
    */
   private lastLoadedProjectId: string | null = null;
+  private assetPreview: AssetPreview | null = null;
+  private assetStore: AssetStore | null = null;
 
   async onload(): Promise<void> {
     await this.loadSettings();
@@ -55,6 +59,8 @@ export default class LinearSpecReviewPlugin
     );
 
     this.addSettingTab(new LinearSettingTab(this.app, this));
+    this.assetStore = new AssetStore(this.app, () => this.getSecretName(), () => this.getSpecsFolder());
+    this.updateAssetPreview();
 
     this.addCommand({
       id: "import-project-url",
@@ -93,14 +99,43 @@ export default class LinearSpecReviewPlugin
   }
 
   onunload(): void {
-    // Views are cleaned up by Obsidian; nothing persistent to tear down.
+    this.assetPreview?.stop();
+    this.assetPreview = null;
+  }
+
+  updateAssetPreview(): void {
+    this.assetPreview?.stop();
+    this.assetPreview = this.assetStore
+      ? new AssetPreview(this.app, this.assetStore, () => this.settings.storeAssetsInVault)
+      : null;
+  }
+
+  storeAssetsInVault(): boolean {
+    return this.settings.storeAssetsInVault;
+  }
+
+  async saveEmbeddedImage(url: string): Promise<string> {
+    if (!this.assetStore) throw new Error("Linear image store is unavailable.");
+    const image = await this.assetStore.load(url, true);
+    if (!image.vaultPath) throw new Error("Linear image was not saved in the vault.");
+    return image.vaultPath;
   }
 
   // --- Settings persistence -------------------------------------------------
 
   async loadSettings(): Promise<void> {
     const data = (await this.loadData()) as Partial<PluginSettings> | null;
-    this.settings = { ...DEFAULT_SETTINGS, ...(data ?? {}) };
+    this.settings = {
+      secretName:
+        typeof data?.secretName === "string"
+          ? data.secretName
+          : DEFAULT_SETTINGS.secretName,
+      specsFolder:
+        typeof data?.specsFolder === "string"
+          ? data.specsFolder
+          : DEFAULT_SETTINGS.specsFolder,
+      storeAssetsInVault: data?.storeAssetsInVault === true,
+    };
   }
 
   async saveSettings(): Promise<void> {

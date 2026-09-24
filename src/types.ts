@@ -79,11 +79,14 @@ export interface PluginSettings {
   secretName: string;
   /** Vault-relative folder where imported specs are written. */
   specsFolder: string;
+  /** Store authenticated images in the vault; false keeps them in a local OS cache. */
+  storeAssetsInVault: boolean;
 }
 
 export const DEFAULT_SETTINGS: PluginSettings = {
   secretName: "",
   specsFolder: "Specs",
+  storeAssetsInVault: false,
 };
 
 export const LINEAR_COMMENTS_VIEW = "linear-spec-review-comments";

@@ -53,6 +53,38 @@ export function getApiKey(app: App, secretName: string): string {
   return key;
 }
 
+/** Download an uploaded Linear attachment with the same secret used by GraphQL. */
+export async function downloadLinearAsset(
+  app: App,
+  secretName: string,
+  url: string
+): Promise<{ bytes: ArrayBuffer; contentType: string }> {
+  const parsed = new URL(url);
+  if (parsed.protocol !== "https:" || parsed.host !== "uploads.linear.app") {
+    throw new LinearError("Refusing to download an asset outside uploads.linear.app.");
+  }
+
+  let res;
+  try {
+    // Signed URLs expire; the upload path remains stable and works with API-key auth.
+    res = await requestUrl({
+      url: parsed.origin + parsed.pathname,
+      headers: { Authorization: getApiKey(app, secretName) },
+      throw: false,
+    });
+  } catch (e) {
+    const message = e instanceof Error ? e.message : String(e);
+    throw new LinearError(`Could not download Linear asset: ${message}`);
+  }
+  if (res.status !== 200) {
+    throw new LinearError(`Linear asset download failed (HTTP ${res.status}).`);
+  }
+  return {
+    bytes: res.arrayBuffer,
+    contentType: (res.headers["content-type"] ?? "").split(";")[0].toLowerCase(),
+  };
+}
+
 interface GraphQLResponse<T> {
   data?: T;
   errors?: Array<{

@@ -7,16 +7,24 @@ import {
   TFile,
   normalizePath,
 } from "obsidian";
+import { posix } from "node:path";
 import { ProjectOverview, ProjectSearchResult } from "./types";
 import { getProjectById, searchProjects } from "./linear/queries";
 import { resolveProjectFromUrl } from "./linear/parseUrl";
-import { buildNote, sanitizeFileName } from "./render/overview";
+import {
+  buildNote,
+  embeddedLinearImages,
+  linkLocalImages,
+  sanitizeFileName,
+} from "./render/overview";
 
 /** Minimal surface the commands need from the plugin. */
 export interface CommandHost {
   app: App;
   getSecretName(): string;
   getSpecsFolder(): string;
+  storeAssetsInVault(): boolean;
+  saveEmbeddedImage(url: string): Promise<string>;
   /** Called after a note is imported so the plugin can reveal/refresh the panel. */
   onImported(file: TFile): Promise<void>;
 }
@@ -161,7 +169,15 @@ export async function writeProjectNote(
     });
   }
 
-  const content = buildNote(project);
+  let content = buildNote(project);
+  if (host.storeAssetsInVault()) {
+    const paths = new Map<string, string>();
+    for (const url of embeddedLinearImages(content)) {
+      const assetPath = await host.saveEmbeddedImage(url);
+      paths.set(url, posix.relative(posix.dirname(path), assetPath));
+    }
+    content = linkLocalImages(content, paths);
+  }
   const existing = app.vault.getAbstractFileByPath(path);
   if (existing instanceof TFile) {
     await app.vault.modify(existing, content);

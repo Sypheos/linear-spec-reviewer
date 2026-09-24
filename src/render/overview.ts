@@ -63,3 +63,17 @@ export function buildNote(project: ProjectOverview): string {
   const body: string = stripLinearTags(project.content);
   return `${frontmatter}\n${body}`;
 }
+
+/** Match only Markdown image embeds hosted by Linear; ordinary links stay links. */
+const UPLOAD_EMBED = /(!\[[^\]\n]*\]\()(https:\/\/uploads\.linear\.app\/[^\s)]+)(\))/g;
+
+export function embeddedLinearImages(md: string): string[] {
+  return [...new Set([...md.matchAll(UPLOAD_EMBED)].map((match) => match[2]))];
+}
+
+export function linkLocalImages(md: string, paths: ReadonlyMap<string, string>): string {
+  return md.replace(UPLOAD_EMBED, (original, prefix: string, url: string, suffix: string) => {
+    const path = paths.get(url);
+    return path ? `${prefix}${encodeURI(path)}${suffix}` : original;
+  });
+}
